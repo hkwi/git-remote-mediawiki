@@ -1,0 +1,10 @@
+git-remote-mediawiki
+
+coverage.out
+coverage.txt
+coverage.html
+
+test/.env
+.codex
+
+.DS_Store

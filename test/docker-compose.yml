@@ -1,0 +1,67 @@
+services:
+  db:
+    image: mariadb:10.5
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wikidb}
+      MYSQL_USER: ${MYSQL_USER:-wikiuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wikipass}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  mediawiki:
+    image: mediawiki:1.45
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+
+        apply_e2e_overrides() {
+          # Append E2E-specific LocalSettings overrides if not already present.
+          if [ -f /var/www/html/LocalSettings.php ]; then
+            if ! grep -q "# E2E overrides" /var/www/html/LocalSettings.php; then
+              # append lines safely without variable expansion
+              echo '# E2E overrides: enable uploads and allow text files for tests' >> /var/www/html/LocalSettings.php
+              echo '$$wgEnableUploads = true;' >> /var/www/html/LocalSettings.php
+              echo '$$wgFileExtensions[] = '\''txt'\'';' >> /var/www/html/LocalSettings.php
+              echo '$$wgFileExtensions[] = '\''text'\'';' >> /var/www/html/LocalSettings.php
+              echo '$$wgUseImageMagick = false;' >> /var/www/html/LocalSettings.php
+            fi
+          fi
+        }
+
+        if [ -f /mw-config/LocalSettings.php ]; then
+          echo "LocalSettings.php already exists; applying E2E overrides and starting."
+          # copy mounted config into place and apply overrides
+          cp /mw-config/LocalSettings.php /var/www/html/LocalSettings.php
+          apply_e2e_overrides
+          exec apache2-foreground
+        fi
+
+        php maintenance/install.php \
+          --confpath /var/www/html/ \
+          --dbtype mysql \
+          --dbserver db \
+          --dbname ${MYSQL_DATABASE:-wikidb} \
+          --dbuser ${MYSQL_USER:-wikiuser} \
+          --dbpass ${MYSQL_PASSWORD:-wikipass} \
+          --lang ja \
+          --server ${WIKI_SERVER:-http://localhost:8080} \
+          --scriptpath "" \
+          --pass ${WIKI_PASS:-adminpass0123456} \
+          TestWiki ${WIKI_USER:-admin}
+
+        # Installer created LocalSettings.php; apply overrides then start apache
+        apply_e2e_overrides
+        exec apache2-foreground
