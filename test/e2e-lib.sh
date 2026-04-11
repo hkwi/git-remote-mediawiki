@@ -37,10 +37,12 @@ e2e_init() {
 }
 
 e2e_cleanup() {
-  if [ "${skip_compose_down:-0}" -eq 0 ]; then
+  if [ -n "${COMPOSE:-}" ] && [ "${skip_compose_down:-0}" -eq 0 ]; then
     $COMPOSE -f docker-compose.yml down -v
   else
-    echo "Skipping compose down because stack was already running before test. Leaving it running."
+    if [ -n "${COMPOSE:-}" ]; then
+      echo "Skipping compose down because stack was already running before test. Leaving it running."
+    fi
   fi
 }
 
@@ -50,10 +52,36 @@ e2e_fail() {
   if [ "$#" -gt 0 ]; then
     "$@" >&2 || true
   fi
-  if [ "${skip_compose_down:-0}" -eq 0 ]; then
+  if [ -n "${COMPOSE:-}" ] && [ "${skip_compose_down:-0}" -eq 0 ]; then
     $COMPOSE -f docker-compose.yml down -v
   fi
   exit "${E2E_EXIT_CODE:-7}"
+}
+
+e2e_api_root() {
+  printf '%s' "${E2E_API_ROOT:-http://mediawiki}"
+}
+
+e2e_git_remote_url() {
+  printf '%s' "${E2E_GIT_REMOTE_URL:-mediawiki::http://mediawiki}"
+}
+
+e2e_normalize_url() {
+  local raw_url="$1"
+  local api_root
+  api_root="$(e2e_api_root)"
+  raw_url="${raw_url#http://localhost:8080}"
+  raw_url="${raw_url#https://localhost:8080}"
+  raw_url="${raw_url#http://127.0.0.1:8080}"
+  raw_url="${raw_url#https://127.0.0.1:8080}"
+  case "$raw_url" in
+    http://*|https://*)
+      printf '%s' "$raw_url"
+      ;;
+    *)
+      printf '%s%s' "$api_root" "$raw_url"
+      ;;
+  esac
 }
 
 e2e_start_stack() {
@@ -76,16 +104,22 @@ e2e_start_stack() {
   fi
 }
 
+e2e_curl_from_git() {
+  local url="$1"
+  $COMPOSE -f docker-compose.yml exec -T git bash -c "curl -s -w '%{http_code}' -o /tmp/e2e-response '$url'"
+}
+
 e2e_wait_for_startup() {
-  echo "Waiting for HTTP port 8080 to accept connections (timeout 120s)..."
+  echo "Waiting for MediaWiki HTTP endpoint to accept connections from the git container (timeout 120s)..."
   local timeout=120
   local elapsed=0
   local interval=2
-  local url="http://localhost:8080/"
+  local url
+  url="$(e2e_api_root)/"
   while true; do
     local http_status_raw
     local http_code
-    http_status_raw=$(curl -s -w "%{http_code}" -o /dev/null "$url" || echo "000")
+    http_status_raw=$(e2e_curl_from_git "$url" || echo "000")
     http_code=${http_status_raw: -3}
     if [[ "$http_code" =~ ^[0-9]{3}$ && "$http_code" != "000" ]]; then
       echo
@@ -107,7 +141,8 @@ e2e_wait_for_api() {
   local timeout=600
   local elapsed=0
   local interval=5
-  local url="http://localhost:8080/api.php?action=query&meta=siteinfo&siprop=general&format=json"
+  local url
+  url="$(e2e_api_root)/api.php?action=query&meta=siteinfo&siprop=general&format=json"
   local respfile
   respfile=$(mktemp)
   export E2E_RESPFILE="$respfile"
@@ -116,8 +151,9 @@ e2e_wait_for_api() {
   until {
     local http_status_raw
     local http_code
-    http_status_raw=$(curl -s -w "%{http_code}" -o "$respfile" "$url" || echo "000")
+    http_status_raw=$(e2e_curl_from_git "$url" || echo "000")
     http_code=${http_status_raw: -3}
+    $COMPOSE -f docker-compose.yml exec -T git bash -c 'cat /tmp/e2e-response 2>/dev/null || true' > "$respfile"
     if [ "$http_code" = "200" ]; then
       echo "DEBUG: HTTP 200 from $url"
       true
@@ -151,20 +187,14 @@ e2e_wait_for_api() {
 
 api_get() {
   local query="$1"
-  curl -fsS "http://localhost:8080/api.php?$query"
+  curl -fsS "$(e2e_api_root)/api.php?$query"
 }
 
 e2e_ensure_helper() {
   echo "Building git-remote-mediawiki helper..."
-  if [ ! -x ../git-remote-mediawiki ]; then
-    echo "Go helper binary not found; attempting to build..."
-    (cd .. && go build -o git-remote-mediawiki .) || e2e_fail "go build failed"
-  fi
-
-  tmpbindir=$(mktemp -d)
-  cp ../git-remote-mediawiki "$tmpbindir/git-remote-mediawiki"
-  chmod +x "$tmpbindir/git-remote-mediawiki"
-  export PATH="$tmpbindir:$PATH"
+  (cd .. && go build -buildvcs=false -o git-remote-mediawiki .) || e2e_fail "go build failed"
+  echo "Installing built git-remote-mediawiki helper into git exec-path..."
+  install -m 755 ../git-remote-mediawiki "$(git --exec-path)/git-remote-mediawiki" || e2e_fail "helper install failed"
 }
 
 e2e_clone_repo() {
@@ -172,7 +202,7 @@ e2e_clone_repo() {
   workdir=$(mktemp -d)
   export workdir
   echo "Cloning wiki via git-remote-mediawiki into $workdir/clone ..."
-  if ! git "${clone_args[@]}" clone mediawiki::http://localhost:8080 "$workdir/clone"; then
+  if ! git "${clone_args[@]}" clone "$(e2e_git_remote_url)" "$workdir/clone"; then
     e2e_fail "git clone via git-remote-mediawiki failed"
   fi
 }
@@ -182,7 +212,7 @@ e2e_clone_repo_into() {
   shift
   local clone_args=("$@")
   echo "Cloning wiki via git-remote-mediawiki into $dest ..."
-  if ! git "${clone_args[@]}" clone mediawiki::http://localhost:8080 "$dest"; then
+  if ! git "${clone_args[@]}" clone "$(e2e_git_remote_url)" "$dest"; then
     e2e_fail "git clone via git-remote-mediawiki failed"
   fi
 }
@@ -279,6 +309,7 @@ e2e_assert_media_content() {
   if [ -z "$file_url" ]; then
     e2e_fail "Verification failed: file URL not found in imageinfo response:" printf '%s\n' "$imageinfo_body"
   fi
+  file_url="$(e2e_normalize_url "$file_url")"
   downloaded_media=$(curl -fsSL "$file_url")
   if [ "$downloaded_media" != "$expected_content" ]; then
     e2e_fail "Verification failed: uploaded media content mismatch" printf 'expected: %s\nactual: %s\n' "$expected_content" "$downloaded_media"
@@ -328,7 +359,7 @@ e2e_clone_with_mediaimport_and_verify() {
   # versions do not propagate -c into helper subprocesses).
   old_media_import_env="${GIT_REMOTE_MEDIAWIKI_MEDIAIMPORT:-}"
   export GIT_REMOTE_MEDIAWIKI_MEDIAIMPORT=1
-  if ! git "${extra_git_args[@]}" -c remote.origin.mediaimport=true clone mediawiki::http://localhost:8080 "$workdir/clone_media"; then
+  if ! git "${extra_git_args[@]}" -c remote.origin.mediaimport=true clone "$(e2e_git_remote_url)" "$workdir/clone_media"; then
     # restore env before failing
     export GIT_REMOTE_MEDIAWIKI_MEDIAIMPORT="${old_media_import_env}"
     e2e_fail "git clone with mediaimport failed"
@@ -341,6 +372,7 @@ e2e_clone_with_mediaimport_and_verify() {
       echo "Info: media not present in clone; attempting API fallback download"
       file_url=$(api_get "action=query&format=json&prop=imageinfo&iiprop=url&titles=File:$media_file" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p' | head -n1 | sed 's#\\/#/#g')
       if [ -n "$file_url" ]; then
+        file_url="$(e2e_normalize_url "$file_url")"
         if curl -fsS -o "$workdir/clone_media/$media_file" "$file_url"; then
           echo "Downloaded media via API to clone_media/$media_file"
         else
@@ -610,4 +642,9 @@ e2e_run_shallow_clone_scenario() {
     fi
   )
   echo "E2E shallow clone verified: $file has a single snapshot commit."
+}
+
+e2e_exec_in_git_container() {
+  local script_name="$1"
+  $COMPOSE -f docker-compose.yml exec -T git bash -c "cd /workspace/test && E2E_API_ROOT=http://mediawiki E2E_GIT_REMOTE_URL=mediawiki::http://mediawiki bash ./$script_name"
 }

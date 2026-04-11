@@ -19,8 +19,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8080:80"
     entrypoint:
       - bash
       - -lc
@@ -57,7 +55,7 @@ services:
           --dbuser ${MYSQL_USER:-wikiuser} \
           --dbpass ${MYSQL_PASSWORD:-wikipass} \
           --lang ja \
-          --server ${WIKI_SERVER:-http://localhost:8080} \
+          --server ${WIKI_SERVER:-http://mediawiki} \
           --scriptpath "" \
           --pass ${WIKI_PASS:-adminpass0123456} \
           TestWiki ${WIKI_USER:-admin}
@@ -65,3 +63,26 @@ services:
         # Installer created LocalSettings.php; apply overrides then start apache
         apply_e2e_overrides
         exec apache2-foreground
+
+  git:
+    image: golang:1.24-bookworm
+    depends_on:
+      mediawiki:
+        condition: service_started
+    working_dir: /workspace/test
+    volumes:
+      - ..:/workspace
+    environment:
+      HOME: /tmp/git-home
+      PATH: /usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      WIKI_USER: ${WIKI_USER:-admin}
+      WIKI_PASS: ${WIKI_PASS:-adminpass0123456}
+      WIKI_DOMAIN: ${WIKI_DOMAIN:-}
+      GIT_REMOTE_MEDIAWIKI_DEBUG: ${GIT_REMOTE_MEDIAWIKI_DEBUG:-1}
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        mkdir -p /tmp/git-home
+        exec sleep infinity

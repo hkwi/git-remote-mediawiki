@@ -235,6 +235,108 @@ func TestImportRevidsFallsBackToSnapshotWhenNoTrackedRevisionsMatched(t *testing
 	}
 }
 
+func TestImportRevidsWarnsWhenRequestedRevisionIsMissingOnFullImport(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{
+			"query": {
+				"pages": [
+					{
+						"title": "Test Page",
+						"revisions": [
+							{
+								"revid": 41,
+								"timestamp": "2024-01-02T03:04:05Z",
+								"user": "Alice",
+								"comment": "Imported",
+								"content": "Hello"
+							}
+						]
+					}
+				]
+			}
+		}`
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{42},
+		map[string]bool{"Test Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "warning: failed to retrieve revision(s): [42]") {
+		t.Fatalf("missing warning: %q", errOut.String())
+	}
+}
+
+func TestImportRevidsFailsWhenRequestedRevisionIsMissingOnIncrementalImport(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{
+			"query": {
+				"pages": [
+					{
+						"title": "Test Page",
+						"revisions": [
+							{
+								"revid": 41,
+								"timestamp": "2024-01-02T03:04:05Z",
+								"user": "Alice",
+								"comment": "Imported",
+								"content": "Hello"
+							}
+						]
+					}
+				]
+			}
+		}`
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{42},
+		map[string]bool{"Test Page": true},
+		2,
+	)
+	if err == nil {
+		t.Fatal("expected missing revision error")
+	}
+	if !strings.Contains(err.Error(), "failed to retrieve revision(s): [42]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

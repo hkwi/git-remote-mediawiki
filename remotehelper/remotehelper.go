@@ -976,6 +976,7 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 			Comment   string
 		}
 		var recs []revRec
+		seenRevids := make(map[int]bool, len(batch))
 
 		if q, ok := data["query"].(map[string]interface{}); ok {
 			if pages, ok := q["pages"].([]interface{}); ok {
@@ -996,6 +997,9 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 										}
 									} else if rf, ok := rm["revid"].(float64); ok {
 										rr.Revid = int(rf)
+									}
+									if rr.Revid != 0 {
+										seenRevids[rr.Revid] = true
 									}
 									// try slots->main (new API format uses slots.main.content)
 									if slots, ok := rm["slots"].(map[string]interface{}); ok {
@@ -1036,6 +1040,21 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 				}
 			}
 		}
+		var missingRevids []int
+		for _, revid := range batch {
+			if !seenRevids[revid] {
+				missingRevids = append(missingRevids, revid)
+			}
+		}
+		if len(missingRevids) > 0 {
+			sort.Ints(missingRevids)
+			msg := fmt.Sprintf("failed to retrieve revision(s): %v", missingRevids)
+			if fullImport {
+				fmt.Fprintf(ew, "warning: %s\n", msg)
+			} else {
+				return fmt.Errorf("%s", msg)
+			}
+		}
 
 		// sort recs by revid ascending
 		sort.Slice(recs, func(i, j int) bool { return recs[i].Revid < recs[j].Revid })
@@ -1072,9 +1091,6 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 				path := escapePath(filename)
 				fmt.Fprintf(w, "M 644 inline %s\n", path)
 				writeData(w, r.Content)
-				// separate entries: write a single extra newline (writeData already
-				// ensures the data block ends with one newline)
-				fmt.Fprint(w, "\n")
 			} else {
 				// treat empty content as deletion
 				path := escapePath(client.SmudgeFilename(r.Title) + ".mw")
@@ -1141,7 +1157,6 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 			} else {
 				fmt.Fprintf(w, "M 644 inline %s\n", path)
 				writeData(w, p.Content)
-				fmt.Fprint(w, "\n")
 			}
 			if mediaImport && strings.HasPrefix(p.Title, "File:") {
 				if err := writeMediaFileInline(w, apiURL, httpClient, p.Title, ""); err != nil {
@@ -1313,7 +1328,6 @@ func writeMediaFileInline(w io.Writer, apiURL string, httpClient *http.Client, t
 	}
 	fmt.Fprintf(w, "M 644 inline %s\n", escapePath(mediaFilenameFromTitle(title)))
 	writeDataBytes(w, data)
-	fmt.Fprint(w, "\n")
 	return nil
 }
 
@@ -1512,11 +1526,7 @@ func doImport(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs
 			fmt.Fprintf(w, "D %s\n", path)
 		} else {
 			fmt.Fprintf(w, "M 644 inline %s\n", path)
-			// write data block (writeData ensures trailing newline is included
-			// in the advertised length).
 			writeData(w, content)
-			// single separator newline (writeData appends one newline)
-			fmt.Fprint(w, "\n")
 		}
 		if getMediaImport(remotename) && strings.HasPrefix(p.Title, "File:") {
 			if err := writeMediaFileInline(w, apiURL, httpClient, p.Title, ""); err != nil {
