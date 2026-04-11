@@ -35,12 +35,14 @@ func Login(apiURL, username, password string, domain ...string) (*http.Client, e
 	tokenVals.Set("format", "json")
 
 	tokenURL := apiURL + "?" + tokenVals.Encode()
-	req, err := http.NewRequest("GET", tokenURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-	resp, err := client.Do(req)
+	resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", tokenURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -81,14 +83,16 @@ func Login(apiURL, username, password string, domain ...string) (*http.Client, e
 		loginVals.Set("lgdomain", strings.TrimSpace(domain[0]))
 	}
 
-	req2, err := http.NewRequest("POST", apiURL, strings.NewReader(loginVals.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-
-	resp2, err := client.Do(req2)
+	loginBody := loginVals.Encode()
+	resp2, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+		req2, err := http.NewRequest("POST", apiURL, strings.NewReader(loginBody))
+		if err != nil {
+			return nil, err
+		}
+		req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req2, nil
+	})
 	if err != nil {
 		return nil, err
 	}

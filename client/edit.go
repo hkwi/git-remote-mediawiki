@@ -24,12 +24,14 @@ func EditPage(apiURL string, httpClient *http.Client, title, content, summary st
 	tokenVals.Set("format", "json")
 
 	tokenURL := apiURL + "?" + tokenVals.Encode()
-	req, err := http.NewRequest("GET", tokenURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-	resp, err := httpClient.Do(req)
+	resp, err := DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", tokenURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -69,14 +71,16 @@ func EditPage(apiURL string, httpClient *http.Client, title, content, summary st
 		vals.Set("token", token)
 	}
 
-	req2, err := http.NewRequest("POST", apiURL, strings.NewReader(vals.Encode()))
-	if err != nil {
-		return 0, err
-	}
-	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-
-	resp2, err := httpClient.Do(req2)
+	editBody := vals.Encode()
+	resp2, err := DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req2, err := http.NewRequest("POST", apiURL, strings.NewReader(editBody))
+		if err != nil {
+			return nil, err
+		}
+		req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req2, nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -120,12 +124,14 @@ func DeletePage(apiURL string, httpClient *http.Client, title, reason string) (i
 	tokenVals.Set("format", "json")
 
 	tokenURL := apiURL + "?" + tokenVals.Encode()
-	req, err := http.NewRequest("GET", tokenURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-	resp, err := httpClient.Do(req)
+	resp, err := DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", tokenURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -163,14 +169,16 @@ func DeletePage(apiURL string, httpClient *http.Client, title, reason string) (i
 		vals.Set("token", token)
 	}
 
-	req2, err := http.NewRequest("POST", apiURL, strings.NewReader(vals.Encode()))
-	if err != nil {
-		return 0, err
-	}
-	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-
-	resp2, err := httpClient.Do(req2)
+	deleteBody := vals.Encode()
+	resp2, err := DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req2, err := http.NewRequest("POST", apiURL, strings.NewReader(deleteBody))
+		if err != nil {
+			return nil, err
+		}
+		req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req2.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req2, nil
+	})
 	if err != nil {
 		return 0, err
 	}

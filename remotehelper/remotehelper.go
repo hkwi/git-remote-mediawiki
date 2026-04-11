@@ -663,12 +663,14 @@ func getLastGlobalRemoteRev(httpClient *http.Client, apiURL string) (int, error)
 	params.Set("rcprop", "ids")
 	params.Set("format", "json")
 	reqURL := apiURL + "?" + params.Encode()
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-	resp, err := httpClient.Do(req)
+	resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -944,12 +946,14 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 		params.Set("format", "json")
 		params.Set("formatversion", "2")
 		reqURL := apiURL + "?" + params.Encode()
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-		resp, err := httpClient.Do(req)
+		resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
 		if err != nil {
 			return err
 		}

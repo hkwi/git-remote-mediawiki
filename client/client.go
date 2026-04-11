@@ -35,12 +35,14 @@ func QueryAllPages(apiURL string, namespace int, limit int) ([]map[string]interf
 
 	for {
 		reqURL := apiURL + "?" + params.Encode()
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-		resp, err := client.Do(req)
+		resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -102,12 +104,14 @@ func GetAllPagesContent(apiURL string, namespace int, limit int) ([]Page, error)
 
 	for {
 		reqURL := apiURL + "?" + params.Encode()
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-		resp, err := client.Do(req)
+		resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -207,12 +211,14 @@ func GetAllPagesContentWithClient(httpClient *http.Client, apiURL string, namesp
 
 	for {
 		reqURL := apiURL + "?" + params.Encode()
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-		resp, err := client.Do(req)
+		resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -313,12 +319,14 @@ func GetPagesByTitlesWithClient(httpClient *http.Client, apiURL string, titles [
 
 		for {
 			reqURL := apiURL + "?" + params.Encode()
-			req, err := http.NewRequest("GET", reqURL, nil)
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-			resp, err := client.Do(req)
+			resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+				req, err := http.NewRequest("GET", reqURL, nil)
+				if err != nil {
+					return nil, err
+				}
+				req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+				return req, nil
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -410,12 +418,14 @@ func GetCategoryMembersWithClient(httpClient *http.Client, apiURL string, catego
 
 	for {
 		reqURL := apiURL + "?" + params.Encode()
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-		resp, err := client.Do(req)
+		resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -478,12 +488,14 @@ func GetNamespaceIDWithClient(httpClient *http.Client, apiURL string, name strin
 	params.Set("siprop", "namespaces")
 
 	reqURL := apiURL + "?" + params.Encode()
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return -1, err
-	}
-	req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
-	resp, err := client.Do(req)
+	resp, err := DoRequestWithRetry(client, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
 	if err != nil {
 		return -1, err
 	}

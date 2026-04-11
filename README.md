@@ -53,6 +53,7 @@ Notes
 
 - `e2e.sh` will automatically build the Go binaries if they are not present.
 - Pass `WIKI_USER`/`WIKI_PASS` to tests if your test wiki uses non-default credentials.
+- When MediaWiki returns HTTP 429 with a `Retry-After` header, the helper retries automatically if the delay is 5 minutes or less; longer delays are treated as errors.
 
 Install as a Git remote helper
 -----------------------------
@@ -100,6 +101,9 @@ git clone mediawiki::http://localhost:8080 my_wiki_clone
 git config --global remote.origin.mwLogin admin
 git config --global remote.origin.mwPassword hogehogehoge
 ```
+
+- OAuth and two-factor authentication (2FA) are not supported.
+- For MediaWiki environments that require stronger operational controls, this tool is intended to be used together with MediaWiki's built-in bot functionality.
 
 - To track specific pages, categories, or namespaces, the legacy plural keys
   (`remote.<name>.pages`, `categories`, `namespaces`) still accept
