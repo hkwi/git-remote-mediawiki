@@ -77,10 +77,12 @@ func TestImportProducesCommit(t *testing.T) {
 
 func TestOptionProgressEnablesProgress(t *testing.T) {
 	oldProgress := progressEnabled
+	oldVerbosity := verbosityLevel
 	oldGetAll := getAllPagesContentFunc
 	oldGit := gitExecWithStdin
 	defer func() {
 		progressEnabled = oldProgress
+		verbosityLevel = oldVerbosity
 		getAllPagesContentFunc = oldGetAll
 		gitExecWithStdin = oldGit
 	}()
@@ -108,6 +110,47 @@ func TestOptionProgressEnablesProgress(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "ok\nprogress Importing snapshot with 1 pages\n") {
 		t.Fatalf("progress was not enabled: %q", got)
+	}
+}
+
+func TestOptionVerbosityZeroSuppressesProgress(t *testing.T) {
+	oldProgress := progressEnabled
+	oldVerbosity := verbosityLevel
+	oldGetAll := getAllPagesContentFunc
+	oldGit := gitExecWithStdin
+	defer func() {
+		progressEnabled = oldProgress
+		verbosityLevel = oldVerbosity
+		getAllPagesContentFunc = oldGetAll
+		gitExecWithStdin = oldGit
+	}()
+
+	getAllPagesContentFunc = func(apiURL string, namespace, limit int) ([]client.Page, error) {
+		return []client.Page{{PageID: 1, Title: "Test Page", Content: "Hello World"}}, nil
+	}
+	gitExecWithStdin = func(stdin string, args ...string) (string, string, error) {
+		if len(args) >= 3 && args[0] == "config" && args[1] == "--get" {
+			switch args[2] {
+			case "remote.origin.shallow", "mediawiki.shallow":
+				return "true", "", nil
+			}
+		}
+		return "", "", nil
+	}
+
+	in := bytes.NewBufferString("option progress true\noption verbosity 0\nimport HEAD\n\n")
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	if err := Run(in, out, errOut, "origin", "http://example.com/w"); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	got := out.String()
+	if strings.Contains(got, "progress ") {
+		t.Fatalf("progress should be suppressed at verbosity 0: %q", got)
+	}
+	if !strings.Contains(got, "ok\nok\ncommit refs/mediawiki/origin/master\n") {
+		t.Fatalf("option acknowledgements or import output missing: %q", got)
 	}
 }
 

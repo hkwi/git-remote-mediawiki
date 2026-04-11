@@ -106,6 +106,8 @@ git \
 
 - OAuth and two-factor authentication (2FA) are not supported.
 - For MediaWiki environments that require stronger operational controls, this tool is intended to be used together with MediaWiki's built-in bot functionality.
+- Known behavioral limitations and platform caveats are documented in
+  [LIMITATIONS.md](LIMITATIONS.md).
 
 - To track specific pages, categories, or namespaces, the legacy plural keys
   (`remote.<name>.pages`, `categories`, `namespaces`) still accept

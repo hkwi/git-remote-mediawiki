@@ -75,14 +75,22 @@ var updatePushMetadataFunc = func(remotename, commit string, revid int64) error 
 }
 
 var progressEnabled bool
+var verbosityLevel = 1
 
 func emitProgress(w io.Writer, format string, args ...interface{}) {
-	if !progressEnabled || w == nil {
+	if !progressEnabled || w == nil || verbosityLevel <= 0 {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.ReplaceAll(msg, "\n", " ")
 	fmt.Fprintf(w, "progress %s\n", msg)
+}
+
+func emitInfo(w io.Writer, format string, args ...interface{}) {
+	if w == nil || verbosityLevel <= 0 {
+		return
+	}
+	fmt.Fprintf(w, format, args...)
 }
 
 func debugEnabled() bool {
@@ -499,6 +507,9 @@ func Run(r io.Reader, w io.Writer, ew io.Writer, remotename, url string) error {
 				progressEnabled = strings.EqualFold(strings.TrimSpace(optParts[1]), "true")
 				fmt.Fprintln(w, "ok")
 			case "verbosity":
+				if n, err := strconv.Atoi(strings.TrimSpace(optParts[1])); err == nil {
+					verbosityLevel = n
+				}
 				fmt.Fprintln(w, "ok")
 			default:
 				fmt.Fprintln(w, "unsupported")
@@ -1664,7 +1675,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 				continue
 			}
 			pushedRevision = revid
-			fmt.Fprintf(ew, "Pushed page %s\n", title)
+			emitInfo(ew, "Pushed page %s\n", title)
 			pushed = true
 			statusOK = true
 		}
@@ -1683,7 +1694,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 				if revid > 0 {
 					pushedRevision = revid
 				}
-				fmt.Fprintf(ew, "Deleted page %s\n", title)
+				emitInfo(ew, "Deleted page %s\n", title)
 				pushed = true
 				statusOK = true
 			}
@@ -1708,7 +1719,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 					if revid > 0 {
 						pushedRevision = revid
 					}
-					fmt.Fprintf(ew, "Uploaded file %s\n", f)
+					emitInfo(ew, "Uploaded file %s\n", f)
 					pushed = true
 					statusOK = true
 				}
@@ -1728,7 +1739,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 					if revid > 0 {
 						pushedRevision = revid
 					}
-					fmt.Fprintf(ew, "Deleted file %s\n", f)
+					emitInfo(ew, "Deleted file %s\n", f)
 					pushed = true
 					statusOK = true
 				}
@@ -1746,7 +1757,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		if statusOK {
 			fmt.Fprintln(w, "ok "+remoteRef)
 			if dumbPush {
-				fmt.Fprintln(ew, "Metadata not updated because dumbPush is enabled; run git pull --rebase to reimport history.")
+				emitInfo(ew, "Metadata not updated because dumbPush is enabled; run git pull --rebase to reimport history.\n")
 			}
 		} else {
 			fmt.Fprintln(w, "error "+remoteRef+" no pages pushed")

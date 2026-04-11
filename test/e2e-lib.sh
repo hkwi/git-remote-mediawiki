@@ -274,6 +274,19 @@ e2e_prepare_repo_at() {
   )
 }
 
+e2e_configure_remote_auth() {
+  local repo_dir="$1"
+  local remote_name="$2"
+  (
+    cd "$repo_dir"
+    git config "remote.${remote_name}.mwLogin" "${WIKI_USER:-admin}"
+    git config "remote.${remote_name}.mwPassword" "${WIKI_PASS:-adminpass}"
+    if [ -n "${WIKI_DOMAIN:-}" ]; then
+      git config "remote.${remote_name}.mwDomain" "${WIKI_DOMAIN}"
+    fi
+  )
+}
+
 e2e_assert_page_contains() {
   local title="$1"
   local needle="$2"
@@ -642,6 +655,61 @@ e2e_run_shallow_clone_scenario() {
     fi
   )
   echo "E2E shallow clone verified: $file has a single snapshot commit."
+}
+
+e2e_run_multiple_remotes_scenario() {
+  local prefix="$1"
+  shift
+  local git_clone_args=("$@")
+
+  git_clone_args=("-c" "remote.origin.mwLogin=${WIKI_USER:-admin}" "${git_clone_args[@]}")
+  if [ -n "${WIKI_PASS:-}" ]; then
+    git_clone_args=("-c" "remote.origin.mwPassword=${WIKI_PASS}" "${git_clone_args[@]}")
+  fi
+  if [ -n "${WIKI_DOMAIN:-}" ]; then
+    git_clone_args=("-c" "remote.origin.mwDomain=${WIKI_DOMAIN}" "${git_clone_args[@]}")
+  fi
+
+  e2e_clone_repo "${git_clone_args[@]}"
+  e2e_prepare_repo
+
+  (
+    cd "$workdir/clone"
+    git remote add mirror "$(e2e_git_remote_url)"
+  )
+  e2e_configure_remote_auth "$workdir/clone" mirror
+
+  echo "Fetching the same wiki through a second remote name..."
+  (
+    cd "$workdir/clone"
+    git fetch mirror
+    git rev-parse --verify refs/mediawiki/origin/master >/dev/null
+    git rev-parse --verify refs/mediawiki/mirror/master >/dev/null
+    git notes --ref=origin/mediawiki show refs/mediawiki/origin/master >/dev/null
+    git notes --ref=mirror/mediawiki show refs/mediawiki/mirror/master >/dev/null
+  )
+  echo "E2E multiple remotes verified: origin and mirror keep separate refs and notes."
+
+  local title="${prefix}_Mirror_Page_$(date +%s)"
+  local file="$title.mw"
+  local content="${prefix} mirror push $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  echo "Pushing through the second remote and re-importing through origin..."
+  (
+    cd "$workdir/clone"
+    printf '%s\n' "$content" > "$file"
+    git add "$file"
+    git commit -m "Add $title via mirror"
+    git push mirror master
+    git fetch origin
+    git rev-parse --verify refs/mediawiki/origin/master >/dev/null
+    git rev-parse --verify refs/mediawiki/mirror/master >/dev/null
+    git notes --ref=origin/mediawiki show refs/mediawiki/origin/master >/dev/null
+    git notes --ref=mirror/mediawiki show refs/mediawiki/mirror/master >/dev/null
+    git show "refs/mediawiki/origin/master:$file" | grep -F -- "$content" >/dev/null
+  )
+  e2e_assert_page_contains "$title" "$content" "E2E multiple remotes verified: push through mirror reached the wiki."
+  e2e_assert_file_contains "$workdir/clone/$file" "$content" "E2E multiple remotes verified: local repository remains consistent after mirror push."
 }
 
 e2e_exec_in_git_container() {
