@@ -1313,6 +1313,42 @@ func writeMediaFileInline(w io.Writer, apiURL string, httpClient *http.Client, t
 	return nil
 }
 
+func parseLegacyConfigList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return strings.Fields(s)
+}
+
+func parseMultiValueConfigList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var values []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		values = append(values, line)
+	}
+	return values
+}
+
+func mergeUniqueStrings(values ...[]string) []string {
+	seen := make(map[string]bool)
+	var merged []string
+	for _, list := range values {
+		for _, v := range list {
+			if !seen[v] {
+				seen[v] = true
+				merged = append(merged, v)
+			}
+		}
+	}
+	return merged
+}
+
 func doImport(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs []string) error {
 	// Attempt to read credentials from git config for this remote (so we
 	// can import pages from wikis that require login).
@@ -1320,26 +1356,27 @@ func doImport(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs
 	var err error
 
 	// Allow selection of pages via git config similar to the Perl helper.
-	// remote.<name>.pages (space/newline separated titles)
-	// remote.<name>.categories (space/newline separated category titles)
-	// remote.<name>.namespaces (space/newline separated namespace names or ids)
+	// Legacy plural keys keep the historical whitespace-splitting behavior.
+	// Singular keys support true multi-value config entries, preserving spaces.
 	trackedPagesStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".pages")
 	trackedCategoriesStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".categories")
 	trackedNamespacesStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".namespaces")
+	trackedPageStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".page")
+	trackedCategoryStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".category")
+	trackedNamespaceStr, _, _ := gitExec("config", "--get-all", "remote."+remotename+".namespace")
 
-	trackedPages := []string{}
-	if strings.TrimSpace(trackedPagesStr) != "" {
-		// split on whitespace/newlines
-		trackedPages = strings.Fields(trackedPagesStr)
-	}
-	trackedCategories := []string{}
-	if strings.TrimSpace(trackedCategoriesStr) != "" {
-		trackedCategories = strings.Fields(trackedCategoriesStr)
-	}
-	trackedNamespaces := []string{}
-	if strings.TrimSpace(trackedNamespacesStr) != "" {
-		trackedNamespaces = strings.Fields(trackedNamespacesStr)
-	}
+	trackedPages := mergeUniqueStrings(
+		parseLegacyConfigList(trackedPagesStr),
+		parseMultiValueConfigList(trackedPageStr),
+	)
+	trackedCategories := mergeUniqueStrings(
+		parseLegacyConfigList(trackedCategoriesStr),
+		parseMultiValueConfigList(trackedCategoryStr),
+	)
+	trackedNamespaces := mergeUniqueStrings(
+		parseLegacyConfigList(trackedNamespacesStr),
+		parseMultiValueConfigList(trackedNamespaceStr),
+	)
 
 	// Read credentials from git config early so we can decide whether
 	// to use the test override or perform authenticated fetches.

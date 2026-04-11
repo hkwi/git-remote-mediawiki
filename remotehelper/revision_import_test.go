@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"git-remote-mediawiki/client"
@@ -132,5 +133,78 @@ func TestGetLastGlobalRemoteRevSkipsRecentChangesWithoutRevid(t *testing.T) {
 	}
 	if got != 42 {
 		t.Fatalf("unexpected revid: got %d want 42", got)
+	}
+}
+
+func TestParseLegacyConfigList(t *testing.T) {
+	got := parseLegacyConfigList("Spaced page\nAnother Page")
+	want := []string{"Spaced", "page", "Another", "Page"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected parsed values: got %#v want %#v", got, want)
+	}
+}
+
+func TestParseMultiValueConfigList(t *testing.T) {
+	got := parseMultiValueConfigList("Spaced page\nAnother Page\n")
+	want := []string{"Spaced page", "Another Page"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected parsed values: got %#v want %#v", got, want)
+	}
+}
+
+func TestDoImportSupportsSingularTrackedConfigKeys(t *testing.T) {
+	oldGit := gitExecWithStdin
+	oldLast := getLastGlobalRemoteRevFunc
+	oldTracked := collectTrackedPagesFunc
+	oldImport := importRevidsFunc
+	defer func() {
+		gitExecWithStdin = oldGit
+		getLastGlobalRemoteRevFunc = oldLast
+		collectTrackedPagesFunc = oldTracked
+		importRevidsFunc = oldImport
+	}()
+
+	gitExecWithStdin = func(stdin string, args ...string) (string, string, error) {
+		if len(args) >= 3 && args[0] == "config" && args[1] == "--get-all" {
+			switch args[2] {
+			case "remote.origin.page":
+				return "Spaced page\nAnother Page\n", "", nil
+			case "remote.origin.category":
+				return "Real Time Strategy Games\n", "", nil
+			case "remote.origin.namespace":
+				return "Talk Pages\n", "", nil
+			}
+		}
+		return "", "", nil
+	}
+	getLastGlobalRemoteRevFunc = func(httpClient *http.Client, apiURL string) (int, error) {
+		return 1, nil
+	}
+	collectTrackedPagesFunc = func(httpClient *http.Client, apiURL string, trackedPages, trackedCategories, trackedNamespaces []string) (map[string]bool, error) {
+		if !reflect.DeepEqual(trackedPages, []string{"Spaced page", "Another Page"}) {
+			t.Fatalf("unexpected tracked pages: %#v", trackedPages)
+		}
+		if !reflect.DeepEqual(trackedCategories, []string{"Real Time Strategy Games"}) {
+			t.Fatalf("unexpected tracked categories: %#v", trackedCategories)
+		}
+		if !reflect.DeepEqual(trackedNamespaces, []string{"Talk Pages"}) {
+			t.Fatalf("unexpected tracked namespaces: %#v", trackedNamespaces)
+		}
+		return map[string]bool{"Spaced page": true}, nil
+	}
+
+	called := false
+	importRevidsFunc = func(w io.Writer, ew io.Writer, remotename, apiURL string, httpClient *http.Client, revisionIDs []int, tracked map[string]bool, fetchFrom int) error {
+		called = true
+		return nil
+	}
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	if err := doImport(out, errOut, "origin", "http://example.com/api.php", "http://example.com", nil); err != nil {
+		t.Fatalf("doImport failed: %v", err)
+	}
+	if !called {
+		t.Fatal("expected revision import path to be used")
 	}
 }

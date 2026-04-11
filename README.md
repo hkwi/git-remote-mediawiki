@@ -101,4 +101,16 @@ git config --global remote.origin.mwLogin admin
 git config --global remote.origin.mwPassword hogehogehoge
 ```
 
+- To track specific pages, categories, or namespaces, the legacy plural keys
+  (`remote.<name>.pages`, `categories`, `namespaces`) still accept
+  whitespace-separated values.
+- For titles that contain spaces, prefer the singular multi-value keys
+  (`remote.<name>.page`, `category`, `namespace`) and add them multiple times:
+
+```bash
+git config --add remote.origin.page "Spaced page"
+git config --add remote.origin.page "Another Page"
+git config --add remote.origin.category "Real Time Strategy Games"
+```
+
 See the root entrypoint: [main.go](main.go).
