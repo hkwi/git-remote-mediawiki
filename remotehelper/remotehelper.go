@@ -720,8 +720,29 @@ func getLastGlobalRemoteRev(httpClient *http.Client, apiURL string) (int, error)
 	if err := dec.Decode(&data); err != nil {
 		return 0, err
 	}
+	if warnings := summarizeAPIWarnings(data); warnings != "" {
+		debugf(nil, "getLastGlobalRemoteRev: warnings=%s", warnings)
+	}
 	if q, ok := data["query"].(map[string]interface{}); ok {
 		if rc, ok := q["recentchanges"].([]interface{}); ok && len(rc) > 0 {
+			var candidates []int
+			for _, item := range rc {
+				entry, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if rn, ok := entry["revid"].(json.Number); ok {
+					if n64, err := rn.Int64(); err == nil && n64 > 0 {
+						candidates = append(candidates, int(n64))
+					}
+				} else if rf, ok := entry["revid"].(float64); ok && rf > 0 {
+					candidates = append(candidates, int(rf))
+				}
+			}
+			if len(candidates) > 0 {
+				debugf(nil, "getLastGlobalRemoteRev: recentchanges revid candidates=%v", candidates)
+				return candidates[0], nil
+			}
 			for _, item := range rc {
 				entry, ok := item.(map[string]interface{})
 				if !ok {
@@ -738,6 +759,833 @@ func getLastGlobalRemoteRev(httpClient *http.Client, apiURL string) (int, error)
 		}
 	}
 	return 0, fmt.Errorf("could not determine last remote revision")
+}
+
+type missingRevisionCheck struct {
+	Revid            int
+	DeletedTitle     string
+	User             string
+	Timestamp        string
+	Comment          string
+	LogAction        string
+	LogUser          string
+	LogTimestamp     string
+	LogComment       string
+	PermissionDenied bool
+}
+
+func inspectMissingRevision(httpClient *http.Client, apiURL string, revid int, ew io.Writer) (missingRevisionCheck, error) {
+	check := missingRevisionCheck{Revid: revid}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	params := url.Values{}
+	params.Set("action", "query")
+	params.Set("prop", "deletedrevisions")
+	params.Set("drvprop", "ids|timestamp|user|comment")
+	params.Set("revids", strconv.Itoa(revid))
+	params.Set("format", "json")
+	params.Set("formatversion", "2")
+	reqURL := apiURL + "?" + params.Encode()
+	debugf(ew, "inspectMissingRevision: revid=%d deletedrevisions request=%s", revid, reqURL)
+	resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
+	if err != nil {
+		return check, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return check, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var data map[string]interface{}
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&data); err != nil {
+		return check, err
+	}
+	if warnings := summarizeAPIWarnings(data); warnings != "" {
+		debugf(ew, "inspectMissingRevision: revid=%d deletedrevisions warnings=%s", revid, warnings)
+	}
+
+	if apiErr, ok := data["error"].(map[string]interface{}); ok {
+		code, _ := apiErr["code"].(string)
+		info, _ := apiErr["info"].(string)
+		debugf(ew, "inspectMissingRevision: revid=%d deletedrevisions api_error code=%q info=%q", revid, code, info)
+		switch code {
+		case "drvpermissiondenied", "adrpermissiondenied":
+			check.PermissionDenied = true
+			return check, nil
+		case "drvnosuchrevid":
+			return check, nil
+		default:
+			if info == "" {
+				info = code
+			}
+			return check, fmt.Errorf("deleted revision lookup failed for %d: %s", revid, info)
+		}
+	}
+
+	if q, ok := data["query"].(map[string]interface{}); ok {
+		if pages, ok := q["pages"].([]interface{}); ok {
+			debugf(ew, "inspectMissingRevision: revid=%d deletedrevisions returned pages=%d", revid, len(pages))
+			for _, p := range pages {
+				pm, ok := p.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				title, _ := pm["title"].(string)
+				if revs, ok := pm["deletedrevisions"].([]interface{}); ok {
+					debugf(ew, "inspectMissingRevision: revid=%d title=%q deletedrevisions=%d", revid, title, len(revs))
+					for _, rv := range revs {
+						rm, ok := rv.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if rn, ok := rm["revid"].(json.Number); ok {
+							if n64, err := rn.Int64(); err == nil && int(n64) == revid {
+								check.DeletedTitle = title
+								check.User, _ = rm["user"].(string)
+								check.Timestamp, _ = rm["timestamp"].(string)
+								check.Comment, _ = rm["comment"].(string)
+								logAction, logUser, logTimestamp, logComment, err := findRevisionLogEvent(httpClient, apiURL, title, revid, ew)
+								if err != nil {
+									return check, err
+								}
+								check.LogAction = logAction
+								check.LogUser = logUser
+								check.LogTimestamp = logTimestamp
+								check.LogComment = logComment
+								return check, nil
+							}
+						} else if rf, ok := rm["revid"].(float64); ok && int(rf) == revid {
+							check.DeletedTitle = title
+							check.User, _ = rm["user"].(string)
+							check.Timestamp, _ = rm["timestamp"].(string)
+							check.Comment, _ = rm["comment"].(string)
+							logAction, logUser, logTimestamp, logComment, err := findRevisionLogEvent(httpClient, apiURL, title, revid, ew)
+							if err != nil {
+								return check, err
+							}
+							check.LogAction = logAction
+							check.LogUser = logUser
+							check.LogTimestamp = logTimestamp
+							check.LogComment = logComment
+							return check, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	debugf(ew, "inspectMissingRevision: revid=%d not found in deletedrevisions", revid)
+	if debugEnabled() {
+		logAction, logUser, logTimestamp, logComment, err := findRevisionLogEventWithoutTitle(httpClient, apiURL, revid, ew)
+		if err != nil {
+			return check, err
+		}
+		check.LogAction = logAction
+		check.LogUser = logUser
+		check.LogTimestamp = logTimestamp
+		check.LogComment = logComment
+	}
+	return check, nil
+}
+
+func formatMissingRevisionMessage(httpClient *http.Client, apiURL string, missingRevids []int, ew io.Writer) (string, error) {
+	msg := fmt.Sprintf("failed to retrieve revision(s): %v", missingRevids)
+	if len(missingRevids) == 0 {
+		return msg, nil
+	}
+
+	var deleted []string
+	permissionDenied := false
+	for _, revid := range missingRevids {
+		check, err := inspectMissingRevision(httpClient, apiURL, revid, ew)
+		if err != nil {
+			return msg, err
+		}
+		if check.DeletedTitle != "" {
+			deleted = append(deleted, summarizeMissingRevisionCheck(check))
+		}
+		if check.PermissionDenied {
+			permissionDenied = true
+		}
+	}
+
+	var details []string
+	if len(deleted) > 0 {
+		details = append(details, "deleted revisions: "+strings.Join(deleted, ", "))
+	}
+	if permissionDenied {
+		details = append(details, "insufficient permissions to inspect deleted revisions")
+	}
+	if len(details) == 0 {
+		return msg, nil
+	}
+	return msg + " (" + strings.Join(details, "; ") + ")", nil
+}
+
+func summarizeMissingRevisionCheck(check missingRevisionCheck) string {
+	parts := []string{fmt.Sprintf("%d=%q", check.Revid, check.DeletedTitle)}
+	if check.User != "" {
+		parts = append(parts, "user="+strconv.Quote(check.User))
+	}
+	if check.Timestamp != "" {
+		parts = append(parts, "timestamp="+strconv.Quote(check.Timestamp))
+	}
+	if check.Comment != "" {
+		parts = append(parts, "comment="+strconv.Quote(check.Comment))
+	}
+	if check.LogAction != "" {
+		logParts := []string{check.LogAction}
+		if check.LogUser != "" {
+			logParts = append(logParts, "by "+check.LogUser)
+		}
+		if check.LogTimestamp != "" {
+			logParts = append(logParts, "at "+check.LogTimestamp)
+		}
+		if check.LogComment != "" {
+			logParts = append(logParts, "comment="+strconv.Quote(check.LogComment))
+		}
+		parts = append(parts, "log="+strconv.Quote(strings.Join(logParts, " ")))
+	}
+	return strings.Join(parts, " ")
+}
+
+func parseNormalGapBadRevids(data map[string]interface{}) map[int]bool {
+	normalGaps := map[int]bool{}
+	q, ok := data["query"].(map[string]interface{})
+	if !ok {
+		return normalGaps
+	}
+	bad, ok := q["badrevids"].(map[string]interface{})
+	if !ok {
+		return normalGaps
+	}
+	for _, raw := range bad {
+		rm, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		missing, _ := rm["missing"].(bool)
+		if !missing {
+			continue
+		}
+		if rn, ok := rm["revid"].(json.Number); ok {
+			if n64, err := rn.Int64(); err == nil {
+				normalGaps[int(n64)] = true
+			}
+		} else if rf, ok := rm["revid"].(float64); ok {
+			normalGaps[int(rf)] = true
+		}
+	}
+	return normalGaps
+}
+
+func summarizeRevisionBatchResponse(data map[string]interface{}) string {
+	var parts []string
+
+	if q, ok := data["query"].(map[string]interface{}); ok {
+		if bad, ok := q["badrevids"].(map[string]interface{}); ok {
+			var badParts []string
+			var keys []string
+			for k := range bad {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				rm, ok := bad[k].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				revid := k
+				if rn, ok := rm["revid"].(json.Number); ok {
+					revid = rn.String()
+				} else if rf, ok := rm["revid"].(float64); ok {
+					revid = strconv.Itoa(int(rf))
+				}
+				if missing, _ := rm["missing"].(bool); missing {
+					badParts = append(badParts, revid+":missing")
+				} else {
+					badParts = append(badParts, revid)
+				}
+			}
+			if len(badParts) > 0 {
+				parts = append(parts, "badrevids=["+strings.Join(badParts, ", ")+"]")
+			}
+		}
+
+		if pages, ok := q["pages"].([]interface{}); ok {
+			var pageParts []string
+			for _, p := range pages {
+				pm, ok := p.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				title, _ := pm["title"].(string)
+				var revids []string
+				if revs, ok := pm["revisions"].([]interface{}); ok {
+					for _, rv := range revs {
+						rm, ok := rv.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if rn, ok := rm["revid"].(json.Number); ok {
+							revids = append(revids, rn.String())
+						} else if rf, ok := rm["revid"].(float64); ok {
+							revids = append(revids, strconv.Itoa(int(rf)))
+						}
+					}
+				}
+				if title == "" {
+					title = "(untitled)"
+				}
+				pageParts = append(pageParts, fmt.Sprintf("%q:%v", title, revids))
+			}
+			if len(pageParts) > 0 {
+				parts = append(parts, "pages=["+strings.Join(pageParts, ", ")+"]")
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return "no query summary fields"
+	}
+	return strings.Join(parts, " ")
+}
+
+func summarizeAPIWarnings(data map[string]interface{}) string {
+	warnings, ok := data["warnings"].(map[string]interface{})
+	if !ok || len(warnings) == 0 {
+		return ""
+	}
+	var parts []string
+	var keys []string
+	for k := range warnings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		var texts []string
+		collectWarningTexts(warnings[k], &texts)
+		if len(texts) == 0 {
+			parts = append(parts, k)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%q", k, strings.Join(texts, " | ")))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func collectWarningTexts(v interface{}, out *[]string) {
+	switch x := v.(type) {
+	case string:
+		s := strings.TrimSpace(x)
+		if s != "" {
+			*out = append(*out, s)
+		}
+	case map[string]interface{}:
+		var keys []string
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			collectWarningTexts(x[k], out)
+		}
+	case []interface{}:
+		for _, item := range x {
+			collectWarningTexts(item, out)
+		}
+	}
+}
+
+func hasTruncatedResultWarning(data map[string]interface{}) bool {
+	warnings, ok := data["warnings"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	var texts []string
+	collectWarningTexts(warnings["result"], &texts)
+	for _, text := range texts {
+		if strings.Contains(strings.ToLower(text), "truncated") {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchSeenRevisionIDs(httpClient *http.Client, apiURL string, revisionIDs []int, ew io.Writer) (map[int]bool, map[int]bool, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	seen := make(map[int]bool, len(revisionIDs))
+	if len(revisionIDs) == 0 {
+		return seen, map[int]bool{}, nil
+	}
+	var idStrs []string
+	for _, id := range revisionIDs {
+		idStrs = append(idStrs, strconv.Itoa(id))
+	}
+	params := url.Values{}
+	params.Set("action", "query")
+	params.Set("prop", "revisions")
+	params.Set("rvprop", "ids")
+	params.Set("revids", strings.Join(idStrs, "|"))
+	params.Set("format", "json")
+	params.Set("formatversion", "2")
+	reqURL := apiURL + "?" + params.Encode()
+	debugf(ew, "fetchSeenRevisionIDs: request=%s", reqURL)
+	resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var data map[string]interface{}
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&data); err != nil {
+		return nil, nil, err
+	}
+	debugf(ew, "fetchSeenRevisionIDs: response summary=%s", summarizeRevisionBatchResponse(data))
+	if warnings := summarizeAPIWarnings(data); warnings != "" {
+		debugf(ew, "fetchSeenRevisionIDs: warnings=%s", warnings)
+	}
+	normalGaps := parseNormalGapBadRevids(data)
+	if q, ok := data["query"].(map[string]interface{}); ok {
+		if pages, ok := q["pages"].([]interface{}); ok {
+			for _, p := range pages {
+				pm, ok := p.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if revs, ok := pm["revisions"].([]interface{}); ok {
+					for _, rv := range revs {
+						rm, ok := rv.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if rn, ok := rm["revid"].(json.Number); ok {
+							if n64, err := rn.Int64(); err == nil {
+								seen[int(n64)] = true
+							}
+						} else if rf, ok := rm["revid"].(float64); ok {
+							seen[int(rf)] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	return seen, normalGaps, nil
+}
+
+type importedRevisionRecord struct {
+	Revid     int
+	Title     string
+	Content   string
+	Timestamp string
+	User      string
+	Comment   string
+}
+
+func fetchRevisionRecords(httpClient *http.Client, apiURL string, revisionIDs []int, ew io.Writer) ([]importedRevisionRecord, map[int]bool, map[int]bool, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	var recs []importedRevisionRecord
+	seen := make(map[int]bool, len(revisionIDs))
+	if len(revisionIDs) == 0 {
+		return recs, seen, map[int]bool{}, nil
+	}
+	var idStrs []string
+	for _, id := range revisionIDs {
+		idStrs = append(idStrs, strconv.Itoa(id))
+	}
+	params := url.Values{}
+	params.Set("action", "query")
+	params.Set("prop", "revisions")
+	params.Set("rvprop", "content|timestamp|comment|user|ids")
+	params.Set("revids", strings.Join(idStrs, "|"))
+	params.Set("format", "json")
+	params.Set("formatversion", "2")
+	reqURL := apiURL + "?" + params.Encode()
+	debugf(ew, "fetchRevisionRecords: request=%s", reqURL)
+	resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+		return req, nil
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var data map[string]interface{}
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&data); err != nil {
+		return nil, nil, nil, err
+	}
+	debugf(ew, "fetchRevisionRecords: response summary=%s", summarizeRevisionBatchResponse(data))
+	if warnings := summarizeAPIWarnings(data); warnings != "" {
+		debugf(ew, "fetchRevisionRecords: warnings=%s", warnings)
+	}
+	if hasTruncatedResultWarning(data) && len(revisionIDs) > 1 {
+		mid := len(revisionIDs) / 2
+		if mid == 0 {
+			mid = 1
+		}
+		leftIDs := append([]int(nil), revisionIDs[:mid]...)
+		rightIDs := append([]int(nil), revisionIDs[mid:]...)
+		debugf(ew, "fetchRevisionRecords: truncation detected, splitting batch into %v and %v", leftIDs, rightIDs)
+		leftRecs, leftSeen, leftNormalGaps, err := fetchRevisionRecords(httpClient, apiURL, leftIDs, ew)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		rightRecs, rightSeen, rightNormalGaps, err := fetchRevisionRecords(httpClient, apiURL, rightIDs, ew)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		mergedRecs := append(leftRecs, rightRecs...)
+		mergedSeen := make(map[int]bool, len(leftSeen)+len(rightSeen))
+		for revid := range leftSeen {
+			mergedSeen[revid] = true
+		}
+		for revid := range rightSeen {
+			mergedSeen[revid] = true
+		}
+		mergedNormalGaps := make(map[int]bool, len(leftNormalGaps)+len(rightNormalGaps))
+		for revid := range leftNormalGaps {
+			mergedNormalGaps[revid] = true
+		}
+		for revid := range rightNormalGaps {
+			mergedNormalGaps[revid] = true
+		}
+		return mergedRecs, mergedSeen, mergedNormalGaps, nil
+	}
+	normalGaps := parseNormalGapBadRevids(data)
+	if q, ok := data["query"].(map[string]interface{}); ok {
+		if pages, ok := q["pages"].([]interface{}); ok {
+			for _, p := range pages {
+				pm, ok := p.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				title, _ := pm["title"].(string)
+				if revs, ok := pm["revisions"].([]interface{}); ok {
+					for _, rv := range revs {
+						rm, ok := rv.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						var rr importedRevisionRecord
+						rr.Title = title
+						if rn, ok := rm["revid"].(json.Number); ok {
+							if n64, err := rn.Int64(); err == nil {
+								rr.Revid = int(n64)
+							}
+						} else if rf, ok := rm["revid"].(float64); ok {
+							rr.Revid = int(rf)
+						}
+						if rr.Revid != 0 {
+							seen[rr.Revid] = true
+						}
+						if slots, ok := rm["slots"].(map[string]interface{}); ok {
+							if mainSlot, ok := slots["main"].(map[string]interface{}); ok {
+								if c, ok := mainSlot["*"].(string); ok {
+									rr.Content = c
+								} else if c2, ok := mainSlot["content"].(string); ok {
+									rr.Content = c2
+								}
+							}
+						}
+						if rr.Content == "" {
+							if s, ok := rm["*"].(string); ok {
+								rr.Content = s
+							} else if s2, ok := rm["content"].(string); ok {
+								rr.Content = s2
+							}
+						}
+						if ts, ok := rm["timestamp"].(string); ok {
+							rr.Timestamp = ts
+						}
+						if u, ok := rm["user"].(string); ok {
+							rr.User = u
+						}
+						if c, ok := rm["comment"].(string); ok {
+							rr.Comment = c
+						}
+						recs = append(recs, rr)
+					}
+				}
+			}
+		}
+	}
+	return recs, seen, normalGaps, nil
+}
+
+func retryMissingRevisionRecords(httpClient *http.Client, apiURL string, revisionIDs []int, maxAttempts int, ew io.Writer) ([]importedRevisionRecord, map[int]bool, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	var allRecs []importedRevisionRecord
+	allNormalGaps := make(map[int]bool)
+	remaining := append([]int(nil), revisionIDs...)
+
+	for attempt := 1; attempt <= maxAttempts && len(remaining) > 0; attempt++ {
+		debugf(ew, "retryMissingRevisionRecords: attempt=%d remaining=%v", attempt, remaining)
+		retriedRecs, retriedSeen, retriedNormalGaps, err := fetchRevisionRecords(httpClient, apiURL, remaining, ew)
+		if err != nil {
+			return nil, nil, err
+		}
+		allRecs = append(allRecs, retriedRecs...)
+		for revid := range retriedNormalGaps {
+			allNormalGaps[revid] = true
+		}
+		var next []int
+		for _, revid := range remaining {
+			if retriedSeen[revid] || allNormalGaps[revid] {
+				continue
+			}
+			next = append(next, revid)
+		}
+		remaining = next
+	}
+
+	return allRecs, allNormalGaps, nil
+}
+
+func trailingMissingRevisions(batch, missing []int) []int {
+	if len(batch) == 0 || len(missing) == 0 {
+		return nil
+	}
+	missingSet := make(map[int]bool, len(missing))
+	for _, revid := range missing {
+		missingSet[revid] = true
+	}
+	var trailing []int
+	for i := len(batch) - 1; i >= 0; i-- {
+		revid := batch[i]
+		if !missingSet[revid] {
+			break
+		}
+		trailing = append(trailing, revid)
+	}
+	for i, j := 0, len(trailing)-1; i < j; i, j = i+1, j-1 {
+		trailing[i], trailing[j] = trailing[j], trailing[i]
+	}
+	return trailing
+}
+
+func suppressibleTrailingMissing(httpClient *http.Client, apiURL string, trailing []int, ew io.Writer) (bool, error) {
+	if len(trailing) == 0 {
+		return false, nil
+	}
+	for _, revid := range trailing {
+		seen, normalGaps, err := fetchSeenRevisionIDs(httpClient, apiURL, []int{revid}, ew)
+		if err != nil {
+			return false, err
+		}
+		if seen[revid] || normalGaps[revid] {
+			debugf(ew, "suppressibleTrailingMissing: revid=%d was retrievable on retry", revid)
+			return false, nil
+		}
+	}
+	debugf(ew, "suppressibleTrailingMissing: trailing missing remained absent on retry=%v", trailing)
+	return true, nil
+}
+
+func findRevisionLogEvent(httpClient *http.Client, apiURL, title string, revid int, ew io.Writer) (string, string, string, string, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	actions := []string{"delete/revision", "suppress/revision"}
+	for _, action := range actions {
+		params := url.Values{}
+		params.Set("action", "query")
+		params.Set("list", "logevents")
+		params.Set("letitle", title)
+		params.Set("leaction", action)
+		params.Set("lelimit", "50")
+		params.Set("leprop", "title|type|user|timestamp|comment|details")
+		params.Set("format", "json")
+		params.Set("formatversion", "2")
+		reqURL := apiURL + "?" + params.Encode()
+		debugf(ew, "findRevisionLogEvent: revid=%d title=%q action=%q request=%s", revid, title, action, reqURL)
+		resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
+		if err != nil {
+			return "", "", "", "", err
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return "", "", "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		}
+
+		var data map[string]interface{}
+		dec := json.NewDecoder(resp.Body)
+		dec.UseNumber()
+		err = dec.Decode(&data)
+		resp.Body.Close()
+		if err != nil {
+			return "", "", "", "", err
+		}
+		if warnings := summarizeAPIWarnings(data); warnings != "" {
+			debugf(ew, "findRevisionLogEvent: revid=%d title=%q action=%q warnings=%s", revid, title, action, warnings)
+		}
+
+		if q, ok := data["query"].(map[string]interface{}); ok {
+			if events, ok := q["logevents"].([]interface{}); ok {
+				debugf(ew, "findRevisionLogEvent: revid=%d title=%q action=%q events=%d", revid, title, action, len(events))
+				for _, event := range events {
+					em, ok := event.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if logEventMentionsRevision(em, revid) {
+						user, _ := em["user"].(string)
+						timestamp, _ := em["timestamp"].(string)
+						comment, _ := em["comment"].(string)
+						debugf(ew, "findRevisionLogEvent: revid=%d matched action=%q user=%q timestamp=%q comment=%q", revid, action, user, timestamp, comment)
+						return action, user, timestamp, comment, nil
+					}
+				}
+			}
+		}
+	}
+	debugf(ew, "findRevisionLogEvent: revid=%d title=%q no matching logevents", revid, title)
+	return "", "", "", "", nil
+}
+
+func findRevisionLogEventWithoutTitle(httpClient *http.Client, apiURL string, revid int, ew io.Writer) (string, string, string, string, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	actions := []string{"delete/revision", "suppress/revision"}
+	for _, action := range actions {
+		params := url.Values{}
+		params.Set("action", "query")
+		params.Set("list", "logevents")
+		params.Set("leaction", action)
+		params.Set("lelimit", "100")
+		params.Set("leprop", "title|type|user|timestamp|comment|details")
+		params.Set("format", "json")
+		params.Set("formatversion", "2")
+		reqURL := apiURL + "?" + params.Encode()
+		debugf(ew, "findRevisionLogEventWithoutTitle: revid=%d action=%q request=%s", revid, action, reqURL)
+		resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("User-Agent", "git-mediawiki-go/0.1")
+			return req, nil
+		})
+		if err != nil {
+			return "", "", "", "", err
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return "", "", "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		}
+		var data map[string]interface{}
+		dec := json.NewDecoder(resp.Body)
+		dec.UseNumber()
+		err = dec.Decode(&data)
+		resp.Body.Close()
+		if err != nil {
+			return "", "", "", "", err
+		}
+		if warnings := summarizeAPIWarnings(data); warnings != "" {
+			debugf(ew, "findRevisionLogEventWithoutTitle: revid=%d action=%q warnings=%s", revid, action, warnings)
+		}
+		if q, ok := data["query"].(map[string]interface{}); ok {
+			if events, ok := q["logevents"].([]interface{}); ok {
+				debugf(ew, "findRevisionLogEventWithoutTitle: revid=%d action=%q events=%d", revid, action, len(events))
+				for _, event := range events {
+					em, ok := event.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if logEventMentionsRevision(em, revid) {
+						title, _ := em["title"].(string)
+						user, _ := em["user"].(string)
+						timestamp, _ := em["timestamp"].(string)
+						comment, _ := em["comment"].(string)
+						debugf(ew, "findRevisionLogEventWithoutTitle: revid=%d matched action=%q title=%q user=%q timestamp=%q comment=%q", revid, action, title, user, timestamp, comment)
+						return action, user, timestamp, comment, nil
+					}
+				}
+			}
+		}
+	}
+	debugf(ew, "findRevisionLogEventWithoutTitle: revid=%d no matching global logevents", revid)
+	return "", "", "", "", nil
+}
+
+func logEventMentionsRevision(v interface{}, revid int) bool {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		for _, vv := range x {
+			if logEventMentionsRevision(vv, revid) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, vv := range x {
+			if logEventMentionsRevision(vv, revid) {
+				return true
+			}
+		}
+	case json.Number:
+		if n64, err := x.Int64(); err == nil && int(n64) == revid {
+			return true
+		}
+	case float64:
+		if int(x) == revid {
+			return true
+		}
+	case string:
+		if x == strconv.Itoa(revid) {
+			return true
+		}
+	}
+	return false
 }
 
 // collectTrackedPages builds a set of tracked page titles according to
@@ -981,6 +1829,7 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 		params.Set("format", "json")
 		params.Set("formatversion", "2")
 		reqURL := apiURL + "?" + params.Encode()
+		debugf(ew, "importRevids: batch request=%s", reqURL)
 		resp, err := client.DoRequestWithRetry(httpClient, func() (*http.Request, error) {
 			req, err := http.NewRequest("GET", reqURL, nil)
 			if err != nil {
@@ -1000,6 +1849,12 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 			return err
 		}
 		resp.Body.Close()
+		if debugEnabled() {
+			debugf(ew, "importRevids: batch response summary=%s", summarizeRevisionBatchResponse(data))
+			if warnings := summarizeAPIWarnings(data); warnings != "" {
+				debugf(ew, "importRevids: batch warnings=%s", warnings)
+			}
+		}
 
 		// collect rev records
 		type revRec struct {
@@ -1012,61 +1867,83 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 		}
 		var recs []revRec
 		seenRevids := make(map[int]bool, len(batch))
+		normalGapRevids := parseNormalGapBadRevids(data)
+		if hasTruncatedResultWarning(data) && len(batch) > 1 {
+			debugf(ew, "importRevids: truncation detected in batch, refetching via split")
+			splitRecs, splitSeen, splitNormalGaps, err := fetchRevisionRecords(httpClient, apiURL, batch, ew)
+			if err != nil {
+				return err
+			}
+			seenRevids = splitSeen
+			normalGapRevids = splitNormalGaps
+			for _, r := range splitRecs {
+				if tracked[r.Title] || strings.HasPrefix(r.Title, "File:") {
+					recs = append(recs, revRec(r))
+				}
+			}
+		} else {
+			if len(normalGapRevids) > 0 {
+				var gaps []int
+				for revid := range normalGapRevids {
+					gaps = append(gaps, revid)
+				}
+				sort.Ints(gaps)
+				debugf(ew, "importRevids: MediaWiki reported normal gap badrevids=%v", gaps)
+			}
 
-		if q, ok := data["query"].(map[string]interface{}); ok {
-			if pages, ok := q["pages"].([]interface{}); ok {
-				for _, p := range pages {
-					if pm, ok := p.(map[string]interface{}); ok {
-						title := ""
-						if t, ok := pm["title"].(string); ok {
-							title = t
-						}
-						if revs, ok := pm["revisions"].([]interface{}); ok {
-							for _, rv := range revs {
-								if rm, ok := rv.(map[string]interface{}); ok {
-									var rr revRec
-									rr.Title = title
-									if rn, ok := rm["revid"].(json.Number); ok {
-										if n64, err := rn.Int64(); err == nil {
-											rr.Revid = int(n64)
+			if q, ok := data["query"].(map[string]interface{}); ok {
+				if pages, ok := q["pages"].([]interface{}); ok {
+					for _, p := range pages {
+						if pm, ok := p.(map[string]interface{}); ok {
+							title := ""
+							if t, ok := pm["title"].(string); ok {
+								title = t
+							}
+							if revs, ok := pm["revisions"].([]interface{}); ok {
+								for _, rv := range revs {
+									if rm, ok := rv.(map[string]interface{}); ok {
+										var rr revRec
+										rr.Title = title
+										if rn, ok := rm["revid"].(json.Number); ok {
+											if n64, err := rn.Int64(); err == nil {
+												rr.Revid = int(n64)
+											}
+										} else if rf, ok := rm["revid"].(float64); ok {
+											rr.Revid = int(rf)
 										}
-									} else if rf, ok := rm["revid"].(float64); ok {
-										rr.Revid = int(rf)
-									}
-									if rr.Revid != 0 {
-										seenRevids[rr.Revid] = true
-									}
-									// try slots->main (new API format uses slots.main.content)
-									if slots, ok := rm["slots"].(map[string]interface{}); ok {
-										if mainSlot, ok := slots["main"].(map[string]interface{}); ok {
-											if c, ok := mainSlot["*"].(string); ok {
-												rr.Content = c
-											} else if c2, ok := mainSlot["content"].(string); ok {
-												rr.Content = c2
+										if rr.Revid != 0 {
+											seenRevids[rr.Revid] = true
+										}
+										// try slots->main (new API format uses slots.main.content)
+										if slots, ok := rm["slots"].(map[string]interface{}); ok {
+											if mainSlot, ok := slots["main"].(map[string]interface{}); ok {
+												if c, ok := mainSlot["*"].(string); ok {
+													rr.Content = c
+												} else if c2, ok := mainSlot["content"].(string); ok {
+													rr.Content = c2
+												}
 											}
 										}
-									}
-									// fallback: legacy keys on the revision object
-									if rr.Content == "" {
-										if s, ok := rm["*"].(string); ok {
-											rr.Content = s
-										} else if s2, ok := rm["content"].(string); ok {
-											rr.Content = s2
+										// fallback: legacy keys on the revision object
+										if rr.Content == "" {
+											if s, ok := rm["*"].(string); ok {
+												rr.Content = s
+											} else if s2, ok := rm["content"].(string); ok {
+												rr.Content = s2
+											}
 										}
-									}
-									if ts, ok := rm["timestamp"].(string); ok {
-										rr.Timestamp = ts
-									}
-									if u, ok := rm["user"].(string); ok {
-										rr.User = u
-									}
-									if c, ok := rm["comment"].(string); ok {
-										rr.Comment = c
-									}
-									// only include if tracked; also include File: pages so
-									// media can be imported even when tracked map misses them.
-									if tracked[rr.Title] || strings.HasPrefix(rr.Title, "File:") {
-										recs = append(recs, rr)
+										if ts, ok := rm["timestamp"].(string); ok {
+											rr.Timestamp = ts
+										}
+										if u, ok := rm["user"].(string); ok {
+											rr.User = u
+										}
+										if c, ok := rm["comment"].(string); ok {
+											rr.Comment = c
+										}
+										if tracked[rr.Title] || strings.HasPrefix(rr.Title, "File:") {
+											recs = append(recs, rr)
+										}
 									}
 								}
 							}
@@ -1074,6 +1951,14 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 					}
 				}
 			}
+		}
+		if len(normalGapRevids) > 0 {
+			var gaps []int
+			for revid := range normalGapRevids {
+				gaps = append(gaps, revid)
+			}
+			sort.Ints(gaps)
+			debugf(ew, "importRevids: MediaWiki reported normal gap badrevids=%v", gaps)
 		}
 		var missingRevids []int
 		for _, revid := range batch {
@@ -1083,11 +1968,57 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 		}
 		if len(missingRevids) > 0 {
 			sort.Ints(missingRevids)
-			msg := fmt.Sprintf("failed to retrieve revision(s): %v", missingRevids)
-			if fullImport {
-				fmt.Fprintf(ew, "warning: %s\n", msg)
-			} else {
-				return fmt.Errorf("%s", msg)
+			debugf(ew, "importRevids: missing revisions in batch=%v seen=%v", missingRevids, seenRevids)
+			var actionableMissing []int
+			var normalGapMissing []int
+			for _, revid := range missingRevids {
+				if normalGapRevids[revid] {
+					normalGapMissing = append(normalGapMissing, revid)
+				} else {
+					actionableMissing = append(actionableMissing, revid)
+				}
+			}
+			if len(normalGapMissing) > 0 {
+				debugf(ew, "importRevids: normal revision gaps skipped=%v", normalGapMissing)
+			}
+			if len(actionableMissing) > 0 {
+				debugf(ew, "importRevids: retrying missing revisions individually=%v", actionableMissing)
+				retriedRecs, retriedNormalGaps, err := retryMissingRevisionRecords(httpClient, apiURL, actionableMissing, 3, ew)
+				if err != nil {
+					return err
+				}
+				retriedSeen := make(map[int]bool)
+				for _, retried := range retriedRecs {
+					retriedSeen[retried.Revid] = true
+					if !seenRevids[retried.Revid] {
+						seenRevids[retried.Revid] = true
+						if tracked[retried.Title] || strings.HasPrefix(retried.Title, "File:") {
+							recs = append(recs, revRec(retried))
+						}
+					}
+				}
+				for revid := range retriedNormalGaps {
+					normalGapRevids[revid] = true
+				}
+				var unresolved []int
+				for _, revid := range actionableMissing {
+					if retriedSeen[revid] || normalGapRevids[revid] {
+						continue
+					}
+					unresolved = append(unresolved, revid)
+				}
+				actionableMissing = unresolved
+			}
+			if len(actionableMissing) > 0 {
+				msg, err := formatMissingRevisionMessage(httpClient, apiURL, actionableMissing, ew)
+				if err != nil {
+					return err
+				}
+				if fullImport {
+					fmt.Fprintf(ew, "warning: %s\n", msg)
+				} else {
+					return fmt.Errorf("%s", msg)
+				}
 			}
 		}
 

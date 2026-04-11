@@ -286,6 +286,441 @@ func TestImportRevidsWarnsWhenRequestedRevisionIsMissingOnFullImport(t *testing.
 	}
 }
 
+func TestImportRevidsSkipsWarningForNormalGapBadRevids(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+	t.Setenv("GIT_REMOTE_MEDIAWIKI_DEBUG", "1")
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{
+			"query": {
+				"badrevids": {
+					"22": {
+						"missing": true,
+						"revid": 22
+					}
+				},
+				"pages": [
+					{
+						"title": "Test Page",
+						"revisions": [
+							{
+								"revid": 21,
+								"timestamp": "2024-01-02T03:04:05Z",
+								"user": "Alice",
+								"comment": "Imported",
+								"content": "Hello"
+							}
+						]
+					}
+				]
+			}
+		}`
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{21, 22},
+		map[string]bool{"Test Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(errOut.String(), "warning: failed to retrieve revision(s): [22]") {
+		t.Fatalf("unexpected warning for normal gap: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "normal revision gaps skipped=[22]") {
+		t.Fatalf("missing debug note for normal gap: %q", errOut.String())
+	}
+}
+
+func TestImportRevidsRetriesMissingRevisionAndImportsIt(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+	t.Setenv("GIT_REMOTE_MEDIAWIKI_DEBUG", "1")
+	var retryCalls int
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		revids := req.URL.Query().Get("revids")
+		var body string
+		switch {
+		case req.URL.Query().Get("prop") == "revisions" && revids == "41|42|43":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Test Page",
+							"revisions": [
+								{
+									"revid": 41,
+									"timestamp": "2024-01-02T03:04:05Z",
+									"user": "Alice",
+									"comment": "Imported",
+									"content": "Hello"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("prop") == "revisions" && revids == "42|43":
+			retryCalls++
+			if retryCalls == 1 {
+				body = `{
+					"query": {
+						"pages": [
+							{
+								"title": "Recovered Page",
+								"revisions": []
+							}
+						]
+					}
+				}`
+			} else {
+				body = `{
+					"query": {
+						"pages": [
+							{
+								"title": "Recovered Page",
+								"revisions": [
+									{
+										"revid": 42,
+										"timestamp": "2024-01-02T03:04:06Z",
+										"user": "Bob",
+										"comment": "Recovered",
+										"content": "World"
+									},
+									{
+										"revid": 43,
+										"timestamp": "2024-01-02T03:04:06Z",
+										"user": "Bob",
+										"comment": "Recovered",
+										"content": "World"
+									}
+								]
+							}
+						]
+					}
+				}`
+			}
+		default:
+			t.Fatalf("unexpected query: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{41, 42, 43},
+		map[string]bool{"Test Page": true, "Recovered Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(errOut.String(), "warning: failed to retrieve revision(s): [42 43]") {
+		t.Fatalf("unexpected warning after retry recovery: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "retrying missing revisions individually=[42 43]") {
+		t.Fatalf("missing retry debug note: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "retryMissingRevisionRecords: attempt=2") {
+		t.Fatalf("missing second retry attempt: %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "Recovered_Page.mw") {
+		t.Fatalf("missing recovered page import: %q", out.String())
+	}
+}
+
+func TestImportRevidsSplitsBatchWhenResultIsTruncated(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+	t.Setenv("GIT_REMOTE_MEDIAWIKI_DEBUG", "1")
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		revids := req.URL.Query().Get("revids")
+		var body string
+		switch {
+		case req.URL.Query().Get("prop") == "revisions" && revids == "41|42":
+			body = `{
+				"warnings": {
+					"result": {
+						"*": "This result was truncated because it would otherwise be larger than the limit of 8,388,608 bytes."
+					}
+				},
+				"query": {
+					"pages": [
+						{
+							"title": "Test Page",
+							"revisions": [
+								{
+									"revid": 41,
+									"timestamp": "2024-01-02T03:04:05Z",
+									"user": "Alice",
+									"comment": "Imported",
+									"content": "Hello"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("prop") == "revisions" && revids == "41":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Test Page",
+							"revisions": [
+								{
+									"revid": 41,
+									"timestamp": "2024-01-02T03:04:05Z",
+									"user": "Alice",
+									"comment": "Imported",
+									"content": "Hello"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("prop") == "revisions" && revids == "42":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Recovered Page",
+							"revisions": [
+								{
+									"revid": 42,
+									"timestamp": "2024-01-02T03:04:06Z",
+									"user": "Bob",
+									"comment": "Recovered",
+									"content": "World"
+								}
+							]
+						}
+					]
+				}
+			}`
+		default:
+			t.Fatalf("unexpected query: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{41, 42},
+		map[string]bool{"Test Page": true, "Recovered Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(errOut.String(), "warning: failed to retrieve revision(s): [42]") {
+		t.Fatalf("unexpected warning after truncation split: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "truncation detected, splitting batch") {
+		t.Fatalf("missing truncation split debug note: %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "Recovered_Page.mw") {
+		t.Fatalf("missing recovered page import after split: %q", out.String())
+	}
+}
+
+func TestImportRevidsReportsDeletedRevisionTitleInWarning(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case req.URL.Query().Get("prop") == "revisions":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Test Page",
+							"revisions": [
+								{
+									"revid": 41,
+									"timestamp": "2024-01-02T03:04:05Z",
+									"user": "Alice",
+									"comment": "Imported",
+									"content": "Hello"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("prop") == "deletedrevisions":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Deleted Page",
+							"deletedrevisions": [
+								{
+									"revid": 42,
+									"timestamp": "2024-02-03T04:05:06Z",
+									"user": "Admin",
+									"comment": "Removed spam"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("list") == "logevents":
+			body = `{
+				"query": {
+					"logevents": [
+						{
+							"user": "Oversighter",
+							"timestamp": "2024-02-03T04:06:07Z",
+							"comment": "Cleanup",
+							"params": {
+								"ids": [42]
+							}
+						}
+					]
+				}
+			}`
+		default:
+			t.Fatalf("unexpected prop query: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{42},
+		map[string]bool{"Test Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errOut.String(), `42="Deleted Page" user="Admin" timestamp="2024-02-03T04:05:06Z" comment="Removed spam"`) {
+		t.Fatalf("missing deleted revision detail: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), `log="delete/revision by Oversighter at 2024-02-03T04:06:07Z comment=\"Cleanup\""`) {
+		t.Fatalf("missing logevent detail: %q", errOut.String())
+	}
+}
+
+func TestImportRevidsReportsDeletedRevisionPermissionWarning(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case req.URL.Query().Get("prop") == "revisions":
+			body = `{
+				"query": {
+					"pages": [
+						{
+							"title": "Test Page",
+							"revisions": [
+								{
+									"revid": 41,
+									"timestamp": "2024-01-02T03:04:05Z",
+									"user": "Alice",
+									"comment": "Imported",
+									"content": "Hello"
+								}
+							]
+						}
+					]
+				}
+			}`
+		case req.URL.Query().Get("prop") == "deletedrevisions":
+			body = `{
+				"error": {
+					"code": "drvpermissiondenied",
+					"info": "You don't have permission to view deleted revision information"
+				}
+			}`
+		default:
+			t.Fatalf("unexpected prop query: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{42},
+		map[string]bool{"Test Page": true},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "insufficient permissions to inspect deleted revisions") {
+		t.Fatalf("missing permission detail: %q", errOut.String())
+	}
+}
+
 func TestImportRevidsFailsWhenRequestedRevisionIsMissingOnIncrementalImport(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	defer func() { http.DefaultTransport = oldTransport }()
