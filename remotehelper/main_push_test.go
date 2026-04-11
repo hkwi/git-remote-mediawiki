@@ -44,9 +44,12 @@ func TestPushCallsEdit(t *testing.T) {
 	}
 
 	var gotTitle, gotContent string
-	editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		gotTitle = title
 		gotContent = content
+		if minor {
+			t.Fatal("minor should be false")
+		}
 		return 123, nil
 	}
 	var gotCommit string
@@ -115,7 +118,7 @@ func TestPushDumbPushSkipsMetadataUpdate(t *testing.T) {
 	showFileFunc = func(commit, path string) (string, error) {
 		return "Hello Push", nil
 	}
-	editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		return 123, nil
 	}
 	deletedMWFilesFunc = func(base, commit string) ([]string, error) { return nil, nil }
@@ -176,7 +179,7 @@ func TestPushPropagatesDeletedPage(t *testing.T) {
 	showFileFunc = func(commit, path string) (string, error) {
 		return "", nil
 	}
-	editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		t.Fatalf("editPage should not be called")
 		return 0, nil
 	}
@@ -265,7 +268,7 @@ func TestPushOnlySendsChangedFiles(t *testing.T) {
 		return "content", nil
 	}
 	var edited []string
-	editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		edited = append(edited, title)
 		return 111, nil
 	}
@@ -287,5 +290,61 @@ func TestPushOnlySendsChangedFiles(t *testing.T) {
 	}
 	if len(edited) != 1 || edited[0] != "Changed" {
 		t.Fatalf("unexpected edited titles: %#v", edited)
+	}
+}
+
+func TestPushUsesMinorFlagFromNotes(t *testing.T) {
+	oldShow := showFileFunc
+	oldEdit := editPage
+	oldDelete := deletePage
+	oldGit := gitExecWithStdin
+	oldUpdate := updatePushMetadataFunc
+	oldDeletedFiles := deletedMWFilesFunc
+	oldChangedFiles := changedMWFilesFunc
+	defer func() {
+		showFileFunc = oldShow
+		editPage = oldEdit
+		deletePage = oldDelete
+		gitExecWithStdin = oldGit
+		updatePushMetadataFunc = oldUpdate
+		deletedMWFilesFunc = oldDeletedFiles
+		changedMWFilesFunc = oldChangedFiles
+	}()
+
+	gitExecWithStdin = func(stdin string, args ...string) (string, string, error) {
+		if len(args) >= 1 && args[0] == "rev-parse" {
+			return "deadbeef", "", nil
+		}
+		if len(args) >= 4 && args[0] == "notes" && args[1] == "--ref=mediawiki-options" && args[2] == "show" && args[3] == "deadbeef" {
+			return "minor: true\n", "", nil
+		}
+		return "", "", nil
+	}
+	changedMWFilesFunc = func(base, commit string) ([]string, error) { return []string{"Test_Page.mw"}, nil }
+	deletedMWFilesFunc = func(base, commit string) ([]string, error) { return nil, nil }
+	showFileFunc = func(commit, path string) (string, error) { return "Hello Push", nil }
+
+	called := false
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
+		called = true
+		if !minor {
+			t.Fatal("expected minor=true")
+		}
+		return 123, nil
+	}
+	deletePage = func(httpClient *http.Client, apiURL, title, reason string) (int64, error) {
+		t.Fatalf("deletePage should not be called")
+		return 0, nil
+	}
+	updatePushMetadataFunc = func(remotename, commit string, revid int64) error { return nil }
+
+	in := bytes.NewBufferString("push refs/heads/master:refs/heads/master\n\n")
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	if err := Run(in, out, errOut, "origin", "http://example.com/w"); err != nil {
+		t.Fatalf("Run failed: %v; stderr=%s", err, errOut.String())
+	}
+	if !called {
+		t.Fatal("expected editPage to be called")
 	}
 }

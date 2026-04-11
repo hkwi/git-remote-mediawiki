@@ -112,7 +112,7 @@ func TestPushMediaExportUploadsChangedFiles(t *testing.T) {
 		}
 		return []byte("hello world"), nil
 	}
-	editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		t.Fatalf("editPage should not be called")
 		return 0, nil
 	}
@@ -121,10 +121,13 @@ func TestPushMediaExportUploadsChangedFiles(t *testing.T) {
 		return 0, nil
 	}
 	var uploaded string
-	uploadFile = func(httpClient *http.Client, apiURL, filename string, content []byte, comment string) (int64, error) {
+	uploadFile = func(httpClient *http.Client, apiURL, filename string, content []byte, comment string, minor bool) (int64, error) {
 		uploaded = filename
 		if string(content) != "hello world" {
 			t.Fatalf("unexpected upload content: %q", string(content))
+		}
+		if minor {
+			t.Fatal("minor should be false")
 		}
 		return 999, nil
 	}

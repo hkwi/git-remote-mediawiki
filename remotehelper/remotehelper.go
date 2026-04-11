@@ -435,16 +435,16 @@ var changedMediaFilesFunc = func(base, commit string) ([]string, error) {
 
 // editPage performs the actual page edit; overrideable for tests. The httpClient
 // may be nil to use defaults or an authenticated client.
-var editPage = func(httpClient *http.Client, apiURL, title, content, summary string) (int64, error) {
-	return client.EditPage(apiURL, httpClient, title, content, summary)
+var editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
+	return client.EditPage(apiURL, httpClient, title, content, summary, minor)
 }
 
 var deletePage = func(httpClient *http.Client, apiURL, title, reason string) (int64, error) {
 	return client.DeletePage(apiURL, httpClient, title, reason)
 }
 
-var uploadFile = func(httpClient *http.Client, apiURL, filename string, content []byte, comment string) (int64, error) {
-	return client.UploadFile(apiURL, httpClient, filename, content, comment)
+var uploadFile = func(httpClient *http.Client, apiURL, filename string, content []byte, comment string, minor bool) (int64, error) {
+	return client.UploadFile(apiURL, httpClient, filename, content, comment, minor)
 }
 
 func usage() {
@@ -648,6 +648,30 @@ func getLastLocalRevision(remotename string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+func getCommitMinor(commit string) bool {
+	candidates := [][]string{
+		{"notes", "--ref=mediawiki-options", "show", commit},
+		{"notes", "--ref=refs/notes/mediawiki-options", "show", commit},
+	}
+	for _, args := range candidates {
+		out, errOut, err := gitExec(args...)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(errOut) != "" {
+			debugf(nil, "git notes show stderr: %s", errOut)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(strings.ToLower(line))
+			switch line {
+			case "minor", "minor: true", "minor=true", "mediawiki_minor: true", "mediawiki_minor=true":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // getLastGlobalRemoteRev queries the wiki for the most recent revision id.
@@ -1622,6 +1646,8 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			continue
 		}
 
+		minor := getCommitMinor(commit)
+
 		for _, f := range files {
 			if !strings.HasSuffix(f, ".mw") {
 				continue
@@ -1632,7 +1658,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 				continue
 			}
 			title := client.FilenameToTitle(filepath.Base(f))
-			revid, err := editPage(httpClient, apiURL, title, content, "Pushed from git")
+			revid, err := editPage(httpClient, apiURL, title, content, "Pushed from git", minor)
 			if err != nil {
 				fmt.Fprintf(ew, "edit %s failed: %v\n", title, err)
 				continue
@@ -1674,7 +1700,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 						fmt.Fprintf(ew, "reading media file %s failed: %v\n", f, err)
 						continue
 					}
-					revid, err := uploadFile(httpClient, apiURL, filepath.Base(f), content, "Uploaded from git")
+					revid, err := uploadFile(httpClient, apiURL, filepath.Base(f), content, "Uploaded from git", minor)
 					if err != nil {
 						fmt.Fprintf(ew, "upload %s failed: %v\n", f, err)
 						continue

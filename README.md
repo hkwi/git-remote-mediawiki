@@ -95,11 +95,13 @@ Notes and verification
 git clone mediawiki::http://localhost:8080 my_wiki_clone
 ```
 
-- To provide wiki credentials (optional), set Git config values globally or per-repo:
+- To provide wiki credentials (optional), prefer passing them at clone time with `-c`:
 
 ```bash
-git config --global remote.origin.mwLogin admin
-git config --global remote.origin.mwPassword hogehogehoge
+git \
+  -c remote.origin.mwLogin=admin \
+  -c remote.origin.mwPassword=hogehogehoge \
+  clone mediawiki::http://localhost:8080 my_wiki_clone
 ```
 
 - OAuth and two-factor authentication (2FA) are not supported.
@@ -115,6 +117,14 @@ git config --global remote.origin.mwPassword hogehogehoge
 git config --add remote.origin.page "Spaced page"
 git config --add remote.origin.page "Another Page"
 git config --add remote.origin.category "Real Time Strategy Games"
+```
+
+- To mark a pushed commit as a minor edit, add a Git note on
+  `refs/notes/mediawiki-options` before pushing:
+
+```bash
+git notes --ref=mediawiki-options add -m "minor: true" HEAD
+git push origin master
 ```
 
 See the root entrypoint: [main.go](main.go).

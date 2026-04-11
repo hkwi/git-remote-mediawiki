@@ -131,7 +131,7 @@ func downloadFileURL(apiURL string, httpClient *http.Client, resolve func() (str
 }
 
 // UploadFile uploads or replaces a media file on the wiki.
-func UploadFile(apiURL string, httpClient *http.Client, filename string, content []byte, comment string) (int64, error) {
+func UploadFile(apiURL string, httpClient *http.Client, filename string, content []byte, comment string, minor bool) (int64, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -185,6 +185,10 @@ func UploadFile(apiURL string, httpClient *http.Client, filename string, content
 	_ = writer.WriteField("ignorewarnings", "1")
 	if comment != "" {
 		_ = writer.WriteField("comment", comment)
+	}
+	if minor {
+		_ = writer.WriteField("ignoreminorerror", "1")
+		_ = writer.WriteField("minor", "1")
 	}
 	if token != "" {
 		_ = writer.WriteField("token", token)

@@ -11,7 +11,7 @@ import (
 
 // EditPage performs a simple edit (create/update) of a page. If httpClient is
 // nil, http.DefaultClient is used. Returns the new revision id when available.
-func EditPage(apiURL string, httpClient *http.Client, title, content, summary string) (int64, error) {
+func EditPage(apiURL string, httpClient *http.Client, title, content, summary string, minor bool) (int64, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -66,6 +66,9 @@ func EditPage(apiURL string, httpClient *http.Client, title, content, summary st
 	vals.Set("text", content)
 	if summary != "" {
 		vals.Set("summary", summary)
+	}
+	if minor {
+		vals.Set("minor", "1")
 	}
 	if token != "" {
 		vals.Set("token", token)

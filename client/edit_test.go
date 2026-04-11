@@ -51,6 +51,38 @@ func TestDeletePage(t *testing.T) {
 	}
 }
 
+func TestEditPageMinor(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			values := string(body)
+			if !strings.Contains(values, "minor=1") {
+				t.Fatalf("missing minor flag: %q", values)
+			}
+			return jsonResponse(`{"edit":{"newrevid":123}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	revid, err := EditPage("http://example.com/api.php", nil, "Foo", "Body", "Summary", true)
+	if err != nil {
+		t.Fatalf("EditPage failed: %v", err)
+	}
+	if revid != 123 {
+		t.Fatalf("unexpected revid: %d", revid)
+	}
+}
+
 func TestGetFileURLAtTimestamp(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -74,6 +106,41 @@ func TestGetFileURLAtTimestamp(t *testing.T) {
 	}
 	if got != "http://files.example/Foo.txt" {
 		t.Fatalf("unexpected URL: %q", got)
+	}
+}
+
+func TestUploadFileMinor(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			values := string(body)
+			if !strings.Contains(values, "name=\"minor\"") || !strings.Contains(values, "\r\n1\r\n") {
+				t.Fatalf("missing minor field: %q", values)
+			}
+			if !strings.Contains(values, "name=\"ignoreminorerror\"") {
+				t.Fatalf("missing ignoreminorerror field: %q", values)
+			}
+			return jsonResponse(`{"upload":{"result":"Success","imageinfo":{"timestamp":"2024-01-02T03:04:05Z"}}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	revid, err := UploadFile("http://example.com/api.php", nil, "Foo.txt", []byte("hello"), "Upload", true)
+	if err != nil {
+		t.Fatalf("UploadFile failed: %v", err)
+	}
+	if revid != 1 {
+		t.Fatalf("unexpected upload marker: %d", revid)
 	}
 }
 
