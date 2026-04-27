@@ -2540,6 +2540,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 
 	for _, ref := range refs {
 		statusOK := false
+		hadError := false
 		var pushedRevision int64
 
 		// strip optional leading '+' from refspec
@@ -2567,6 +2568,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		commit, _, err := gitExec("rev-parse", local)
 		if err != nil {
 			fmt.Fprintf(ew, "rev-parse failed for %s: %v\n", local, err)
+			fmt.Fprintln(w, "error "+remoteRef+" rev-parse failed")
 			continue
 		}
 		commit = strings.TrimSpace(commit)
@@ -2585,6 +2587,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		files, err := changedMWFilesFunc(baseCommit, commit)
 		if err != nil {
 			fmt.Fprintf(ew, "listing changed files failed: %v\n", err)
+			fmt.Fprintln(w, "error "+remoteRef+" listing changed files failed")
 			continue
 		}
 
@@ -2597,12 +2600,14 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			content, err := showFileFunc(commit, f)
 			if err != nil {
 				fmt.Fprintf(ew, "reading file %s failed: %v\n", f, err)
+				hadError = true
 				continue
 			}
 			title := client.FilenameToTitle(filepath.Base(f))
 			revid, err := editPage(httpClient, apiURL, title, content, "Pushed from git", minor)
 			if err != nil {
 				fmt.Fprintf(ew, "edit %s failed: %v\n", title, err)
+				hadError = true
 				continue
 			}
 			pushedRevision = revid
@@ -2614,12 +2619,14 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		deletedFiles, err := deletedMWFilesFunc(baseCommit, commit)
 		if err != nil {
 			fmt.Fprintf(ew, "listing deleted files failed: %v\n", err)
+			hadError = true
 		} else {
 			for _, f := range deletedFiles {
 				title := client.FilenameToTitle(filepath.Base(f))
 				revid, err := deletePage(httpClient, apiURL, title, "Deleted from git")
 				if err != nil {
 					fmt.Fprintf(ew, "delete %s failed: %v\n", title, err)
+					hadError = true
 					continue
 				}
 				if revid > 0 {
@@ -2635,16 +2642,19 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			changedMedia, err := changedMediaFilesFunc(baseCommit, commit)
 			if err != nil {
 				fmt.Fprintf(ew, "listing changed media files failed: %v\n", err)
+				hadError = true
 			} else {
 				for _, f := range changedMedia {
 					content, err := showFileBytesFunc(commit, f)
 					if err != nil {
 						fmt.Fprintf(ew, "reading media file %s failed: %v\n", f, err)
+						hadError = true
 						continue
 					}
 					revid, err := uploadFile(httpClient, apiURL, filepath.Base(f), content, "Uploaded from git", minor)
 					if err != nil {
 						fmt.Fprintf(ew, "upload %s failed: %v\n", f, err)
+						hadError = true
 						continue
 					}
 					if revid > 0 {
@@ -2659,12 +2669,14 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			deletedMedia, err := deletedMediaFilesFunc(baseCommit, commit)
 			if err != nil {
 				fmt.Fprintf(ew, "listing deleted media files failed: %v\n", err)
+				hadError = true
 			} else {
 				for _, f := range deletedMedia {
 					title := "File:" + filepath.Base(f)
 					revid, err := deletePage(httpClient, apiURL, title, "Deleted from git")
 					if err != nil {
 						fmt.Fprintf(ew, "delete media %s failed: %v\n", f, err)
+						hadError = true
 						continue
 					}
 					if revid > 0 {
@@ -2677,7 +2689,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			}
 		}
 
-		if statusOK && !dumbPush {
+		if statusOK && !hadError && !dumbPush {
 			if err := updatePushMetadataFunc(remotename, commit, pushedRevision); err != nil {
 				fmt.Fprintf(ew, "metadata update failed: %v\n", err)
 				fmt.Fprintln(w, "error "+remoteRef+" metadata update failed")
@@ -2685,7 +2697,9 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			}
 		}
 
-		if statusOK {
+		if hadError {
+			fmt.Fprintln(w, "error "+remoteRef+" push failed")
+		} else if statusOK {
 			fmt.Fprintln(w, "ok "+remoteRef)
 			if dumbPush {
 				emitInfo(ew, "Metadata not updated because dumbPush is enabled; run git pull --rebase to reimport history.\n")

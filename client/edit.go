@@ -9,6 +9,25 @@ import (
 	"strings"
 )
 
+func mediaWikiAPIError(resp map[string]interface{}) error {
+	errVal, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	code, _ := errVal["code"].(string)
+	info, _ := errVal["info"].(string)
+	switch {
+	case code != "" && info != "":
+		return fmt.Errorf("mediawiki API error %s: %s", code, info)
+	case info != "":
+		return fmt.Errorf("mediawiki API error: %s", info)
+	case code != "":
+		return fmt.Errorf("mediawiki API error: %s", code)
+	default:
+		return fmt.Errorf("mediawiki API error")
+	}
+}
+
 // EditPage performs a simple edit (create/update) of a page. If httpClient is
 // nil, http.DefaultClient is used. Returns the new revision id when available.
 func EditPage(apiURL string, httpClient *http.Client, title, content, summary string, minor bool) (int64, error) {
@@ -101,7 +120,13 @@ func EditPage(apiURL string, httpClient *http.Client, title, content, summary st
 	}
 	resp2.Body.Close()
 
+	if err := mediaWikiAPIError(editResp); err != nil {
+		return 0, err
+	}
 	if e, ok := editResp["edit"].(map[string]interface{}); ok {
+		if result, ok := e["result"].(string); ok && !strings.EqualFold(result, "success") {
+			return 0, fmt.Errorf("edit failed: %s", result)
+		}
 		if nr, ok := e["newrevid"].(json.Number); ok {
 			if id, err := nr.Int64(); err == nil {
 				return id, nil
@@ -109,8 +134,9 @@ func EditPage(apiURL string, httpClient *http.Client, title, content, summary st
 		} else if nrf, ok := e["newrevid"].(float64); ok {
 			return int64(nrf), nil
 		}
+		return 0, nil
 	}
-	return 0, nil
+	return 0, fmt.Errorf("edit failed: missing edit response")
 }
 
 // DeletePage deletes a page from MediaWiki. If httpClient is nil,
@@ -199,6 +225,9 @@ func DeletePage(apiURL string, httpClient *http.Client, title, reason string) (i
 	}
 	resp2.Body.Close()
 
+	if err := mediaWikiAPIError(delResp); err != nil {
+		return 0, err
+	}
 	if d, ok := delResp["delete"].(map[string]interface{}); ok {
 		if logid, ok := d["logid"].(json.Number); ok {
 			if id, err := logid.Int64(); err == nil {
@@ -207,6 +236,7 @@ func DeletePage(apiURL string, httpClient *http.Client, title, reason string) (i
 		} else if logidf, ok := d["logid"].(float64); ok {
 			return int64(logidf), nil
 		}
+		return 0, nil
 	}
-	return 0, nil
+	return 0, fmt.Errorf("delete failed: missing delete response")
 }

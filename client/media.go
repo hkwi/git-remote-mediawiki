@@ -230,6 +230,9 @@ func UploadFile(apiURL string, httpClient *http.Client, filename string, content
 	}
 	resp2.Body.Close()
 
+	if err := mediaWikiAPIError(uploadResp); err != nil {
+		return 0, err
+	}
 	if up, ok := uploadResp["upload"].(map[string]interface{}); ok {
 		if result, ok := up["result"].(string); ok && !strings.EqualFold(result, "success") && !strings.EqualFold(result, "warning") {
 			return 0, fmt.Errorf("upload failed: %s", result)
@@ -239,6 +242,7 @@ func UploadFile(apiURL string, httpClient *http.Client, filename string, content
 				return 1, nil
 			}
 		}
+		return 0, nil
 	}
-	return 0, nil
+	return 0, fmt.Errorf("upload failed: missing upload response")
 }

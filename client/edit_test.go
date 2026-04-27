@@ -83,6 +83,69 @@ func TestEditPageMinor(t *testing.T) {
 	}
 }
 
+func TestEditPageReturnsMediaWikiAPIError(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			return jsonResponse(`{"error":{"code":"permissiondenied","info":"You do not have permission to edit this page."}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	_, err := EditPage("http://example.com/api.php", nil, "Foo", "Body", "Summary", false)
+	if err == nil || !strings.Contains(err.Error(), "permissiondenied") {
+		t.Fatalf("expected API error, got %v", err)
+	}
+}
+
+func TestEditPageReturnsFailedResult(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			return jsonResponse(`{"edit":{"result":"Failure"}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	_, err := EditPage("http://example.com/api.php", nil, "Foo", "Body", "Summary", false)
+	if err == nil || !strings.Contains(err.Error(), "edit failed") {
+		t.Fatalf("expected edit failure, got %v", err)
+	}
+}
+
+func TestDeletePageReturnsMediaWikiAPIError(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			return jsonResponse(`{"error":{"code":"missingtitle","info":"The page you specified does not exist."}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	_, err := DeletePage("http://example.com/api.php", nil, "Foo", "Deleted from git")
+	if err == nil || !strings.Contains(err.Error(), "missingtitle") {
+		t.Fatalf("expected API error, got %v", err)
+	}
+}
+
 func TestGetFileURLAtTimestamp(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -141,6 +204,27 @@ func TestUploadFileMinor(t *testing.T) {
 	}
 	if revid != 1 {
 		t.Fatalf("unexpected upload marker: %d", revid)
+	}
+}
+
+func TestUploadFileReturnsMediaWikiAPIError(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case "GET":
+			return jsonResponse(`{"query":{"tokens":{"csrftoken":"tok123"}}}`, req), nil
+		case "POST":
+			return jsonResponse(`{"error":{"code":"fileexists-no-change","info":"No changes were made."}}`, req), nil
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	_, err := UploadFile("http://example.com/api.php", nil, "Foo.txt", []byte("hello"), "Upload", false)
+	if err == nil || !strings.Contains(err.Error(), "fileexists-no-change") {
+		t.Fatalf("expected API error, got %v", err)
 	}
 }
 

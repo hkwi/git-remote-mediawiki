@@ -2,6 +2,7 @@ package remotehelper
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -219,6 +220,72 @@ func TestPushPropagatesDeletedPage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ok refs/heads/master") {
 		t.Fatalf("missing push status: %q", out.String())
+	}
+}
+
+func TestPushReportsErrorWhenAnyPageEditFails(t *testing.T) {
+	oldList := listFilesFunc
+	oldShow := showFileFunc
+	oldEdit := editPage
+	oldDelete := deletePage
+	oldGit := gitExecWithStdin
+	oldUpdate := updatePushMetadataFunc
+	oldDeletedFiles := deletedMWFilesFunc
+	oldChangedFiles := changedMWFilesFunc
+	defer func() {
+		listFilesFunc = oldList
+		showFileFunc = oldShow
+		editPage = oldEdit
+		deletePage = oldDelete
+		gitExecWithStdin = oldGit
+		updatePushMetadataFunc = oldUpdate
+		deletedMWFilesFunc = oldDeletedFiles
+		changedMWFilesFunc = oldChangedFiles
+	}()
+
+	gitExecWithStdin = func(stdin string, args ...string) (string, string, error) {
+		if len(args) >= 1 && args[0] == "rev-parse" {
+			return "deadbeef", "", nil
+		}
+		return "", "", nil
+	}
+	listFilesFunc = func(commit string) ([]string, error) {
+		return []string{"Good.mw", "Bad.mw"}, nil
+	}
+	changedMWFilesFunc = func(base, commit string) ([]string, error) {
+		return []string{"Good.mw", "Bad.mw"}, nil
+	}
+	showFileFunc = func(commit, path string) (string, error) {
+		return "Hello Push", nil
+	}
+	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
+		if title == "Bad" {
+			return 0, errors.New("permission denied")
+		}
+		return 123, nil
+	}
+	deletedMWFilesFunc = func(base, commit string) ([]string, error) { return nil, nil }
+
+	called := false
+	updatePushMetadataFunc = func(remotename, commit string, revid int64) error {
+		called = true
+		return nil
+	}
+
+	in := bytes.NewBufferString("push refs/heads/master:refs/heads/master\n\n")
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	if err := Run(in, out, errOut, "origin", "http://example.com/w"); err != nil {
+		t.Fatalf("Run failed: %v; stderr=%s", err, errOut.String())
+	}
+	if called {
+		t.Fatal("metadata should not be updated after a partial push failure")
+	}
+	if !strings.Contains(out.String(), "error refs/heads/master push failed") {
+		t.Fatalf("missing push error status: stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "ok refs/heads/master") {
+		t.Fatalf("push should not report ok after a partial failure: %q", out.String())
 	}
 }
 
