@@ -94,6 +94,9 @@ func TestPushMediaExportUploadsChangedFiles(t *testing.T) {
 			}
 			return "deadbeef", "", nil
 		}
+		if len(args) >= 4 && args[0] == "log" && args[1] == "--no-walk" && args[2] == "--format=%s" && args[3] == "deadbeef" {
+			return "Upload subject\n", "", nil
+		}
 		if len(args) >= 3 && args[0] == "config" && args[1] == "--get" && args[2] == "remote.origin.mediaexport" {
 			return "true", "", nil
 		}
@@ -125,6 +128,9 @@ func TestPushMediaExportUploadsChangedFiles(t *testing.T) {
 		uploaded = filename
 		if string(content) != "hello world" {
 			t.Fatalf("unexpected upload content: %q", string(content))
+		}
+		if comment != "Upload subject" {
+			t.Fatalf("unexpected upload comment: %q", comment)
 		}
 		if minor {
 			t.Fatal("minor should be false")

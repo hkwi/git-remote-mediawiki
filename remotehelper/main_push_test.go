@@ -35,6 +35,9 @@ func TestPushCallsEdit(t *testing.T) {
 		if len(args) >= 1 && args[0] == "rev-parse" {
 			return "deadbeef", "", nil
 		}
+		if len(args) >= 4 && args[0] == "log" && args[1] == "--no-walk" && args[2] == "--format=%s" && args[3] == "deadbeef" {
+			return "Commit subject\n", "", nil
+		}
 		return "", "", nil
 	}
 
@@ -44,10 +47,11 @@ func TestPushCallsEdit(t *testing.T) {
 		return "Hello Push", nil
 	}
 
-	var gotTitle, gotContent string
+	var gotTitle, gotContent, gotSummary string
 	editPage = func(httpClient *http.Client, apiURL, title, content, summary string, minor bool) (int64, error) {
 		gotTitle = title
 		gotContent = content
+		gotSummary = summary
 		if minor {
 			t.Fatal("minor should be false")
 		}
@@ -74,6 +78,9 @@ func TestPushCallsEdit(t *testing.T) {
 	}
 	if gotContent != "Hello Push" {
 		t.Fatalf("unexpected content: %q", gotContent)
+	}
+	if gotSummary != "Commit subject" {
+		t.Fatalf("unexpected summary: %q", gotSummary)
 	}
 	if gotCommit != "deadbeef" || gotRevid != 123 {
 		t.Fatalf("unexpected metadata update args: commit=%q revid=%d", gotCommit, gotRevid)
@@ -171,6 +178,9 @@ func TestPushPropagatesDeletedPage(t *testing.T) {
 			}
 			return "deadbeef", "", nil
 		}
+		if len(args) >= 4 && args[0] == "log" && args[1] == "--no-walk" && args[2] == "--format=%s" && args[3] == "deadbeef" {
+			return "Delete subject\n", "", nil
+		}
 		return "", "", nil
 	}
 	listFilesFunc = func(commit string) ([]string, error) {
@@ -191,9 +201,10 @@ func TestPushPropagatesDeletedPage(t *testing.T) {
 		return []string{"Foo.mw"}, nil
 	}
 
-	var gotTitle string
+	var gotTitle, gotReason string
 	deletePage = func(httpClient *http.Client, apiURL, title, reason string) (int64, error) {
 		gotTitle = title
+		gotReason = reason
 		return 456, nil
 	}
 
@@ -214,6 +225,9 @@ func TestPushPropagatesDeletedPage(t *testing.T) {
 
 	if gotTitle != "Foo" {
 		t.Fatalf("unexpected deleted title: %q", gotTitle)
+	}
+	if gotReason != "Delete subject" {
+		t.Fatalf("unexpected delete reason: %q", gotReason)
 	}
 	if gotCommit != "deadbeef" || gotRevid != 456 {
 		t.Fatalf("unexpected metadata update args: commit=%q revid=%d", gotCommit, gotRevid)
