@@ -281,6 +281,17 @@ var showFileBytesFunc = func(commit, path string) ([]byte, error) {
 	return []byte(out), nil
 }
 
+func getCommitSummary(commit string) (string, error) {
+	out, errOut, err := gitExec("log", "--no-walk", "--format=%s", commit)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(errOut) != "" {
+		debugf(nil, "git log stderr: %s", errOut)
+	}
+	return strings.TrimRight(out, "\r\n"), nil
+}
+
 var deletedMWFilesFunc = func(base, commit string) ([]string, error) {
 	if strings.TrimSpace(base) == "" {
 		return nil, nil
@@ -2592,6 +2603,12 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		}
 
 		minor := getCommitMinor(commit)
+		summary, err := getCommitSummary(commit)
+		if err != nil {
+			fmt.Fprintf(ew, "reading commit message failed: %v\n", err)
+			fmt.Fprintln(w, "error "+remoteRef+" reading commit message failed")
+			continue
+		}
 
 		for _, f := range files {
 			if !strings.HasSuffix(f, ".mw") {
@@ -2604,7 +2621,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 				continue
 			}
 			title := client.FilenameToTitle(filepath.Base(f))
-			revid, err := editPage(httpClient, apiURL, title, content, "Pushed from git", minor)
+			revid, err := editPage(httpClient, apiURL, title, content, summary, minor)
 			if err != nil {
 				fmt.Fprintf(ew, "edit %s failed: %v\n", title, err)
 				hadError = true
@@ -2623,7 +2640,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 		} else {
 			for _, f := range deletedFiles {
 				title := client.FilenameToTitle(filepath.Base(f))
-				revid, err := deletePage(httpClient, apiURL, title, "Deleted from git")
+				revid, err := deletePage(httpClient, apiURL, title, summary)
 				if err != nil {
 					fmt.Fprintf(ew, "delete %s failed: %v\n", title, err)
 					hadError = true
@@ -2651,7 +2668,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 						hadError = true
 						continue
 					}
-					revid, err := uploadFile(httpClient, apiURL, filepath.Base(f), content, "Uploaded from git", minor)
+					revid, err := uploadFile(httpClient, apiURL, filepath.Base(f), content, summary, minor)
 					if err != nil {
 						fmt.Fprintf(ew, "upload %s failed: %v\n", f, err)
 						hadError = true
@@ -2673,7 +2690,7 @@ func doPush(w io.Writer, ew io.Writer, remotename, apiURL, rawURL string, refs [
 			} else {
 				for _, f := range deletedMedia {
 					title := "File:" + filepath.Base(f)
-					revid, err := deletePage(httpClient, apiURL, title, "Deleted from git")
+					revid, err := deletePage(httpClient, apiURL, title, summary)
 					if err != nil {
 						fmt.Fprintf(ew, "delete media %s failed: %v\n", f, err)
 						hadError = true
