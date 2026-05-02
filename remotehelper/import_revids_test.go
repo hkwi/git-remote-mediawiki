@@ -96,6 +96,100 @@ func TestImportRevidsFullImportFirstCommitResetsRefs(t *testing.T) {
 	}
 }
 
+func TestImportRevidsIncrementalDoesNotParentMissingNotesRefs(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	oldGit := gitExecWithStdin
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{
+			"query": {
+				"pages": [
+					{
+						"title": "Test Page",
+						"revisions": [
+							{
+								"revid": 42,
+								"timestamp": "2024-01-02T03:04:05Z",
+								"user": "Alice",
+								"comment": "Imported",
+								"content": "Hello"
+							}
+						]
+					}
+				]
+			}
+		}`
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	gitExecWithStdin = func(stdin string, args ...string) (string, string, error) {
+		if len(args) >= 3 && args[0] == "rev-parse" && args[1] == "--verify" && strings.HasPrefix(args[2], "refs/notes/") {
+			return "", "", assertAnError{}
+		}
+		return "", "", nil
+	}
+	defer func() {
+		http.DefaultTransport = oldTransport
+		gitExecWithStdin = oldGit
+	}()
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+
+	err := importRevids(
+		out,
+		errOut,
+		"origin",
+		"http://example.com/api.php",
+		nil,
+		[]int{42},
+		map[string]bool{"Test Page": true},
+		2,
+	)
+	if err != nil {
+		t.Fatalf("importRevids failed: %v", err)
+	}
+
+	got := out.String()
+	if strings.Contains(got, "from refs/notes/commits^0") {
+		t.Fatalf("unexpected missing legacy notes parent: %q", got)
+	}
+	if strings.Contains(got, "from refs/notes/origin/mediawiki^0") {
+		t.Fatalf("unexpected missing per-remote notes parent: %q", got)
+	}
+
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", repo)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	initial := strings.Join([]string{
+		"commit refs/mediawiki/origin/master",
+		"committer git-mediawiki <noreply@example.com> 1700000000 +0000",
+		"data 7",
+		"Initial",
+		"M 644 inline \"Test_Page.mw\"",
+		"data 3",
+		"Old",
+		"",
+	}, "\n")
+	fastImport := exec.Command("git", "fast-import", "--quiet")
+	fastImport.Dir = repo
+	fastImport.Stdin = strings.NewReader(initial)
+	if out, err := fastImport.CombinedOutput(); err != nil {
+		t.Fatalf("git fast-import rejected initial stream: %v\n%s\nstream:\n%s", err, out, initial)
+	}
+	fastImport = exec.Command("git", "fast-import", "--quiet")
+	fastImport.Dir = repo
+	fastImport.Stdin = strings.NewReader(got)
+	if out, err := fastImport.CombinedOutput(); err != nil {
+		t.Fatalf("git fast-import rejected incremental stream: %v\n%s\nstream:\n%s", err, out, got)
+	}
+}
+
 func TestImportRevidsSanitizesCommitterForFastImport(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {

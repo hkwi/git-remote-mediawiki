@@ -2096,7 +2096,7 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 				fmt.Fprintf(w, "commit %s\n", noteRef)
 				fmt.Fprintf(w, "committer %s <%s@%s> %d +0000\n", committer, emailLocal, wikiName, epoch)
 				writeData(w, "Note added by git-mediawiki during import")
-				if !fullImport && mark == 1 {
+				if !fullImport && mark == 1 && refExists(noteRef+"^0") {
 					fmt.Fprintf(w, "from %s^0\n", noteRef)
 				}
 				// associate note with the commit mark
