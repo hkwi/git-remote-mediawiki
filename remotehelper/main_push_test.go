@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -427,5 +428,91 @@ func TestPushUsesMinorFlagFromNotes(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected editPage to be called")
+	}
+}
+
+func TestListFilesParsesNULSeparatedUTF8Paths(t *testing.T) {
+	oldGit := gitExec
+	defer func() { gitExec = oldGit }()
+
+	gitExec = func(args ...string) (string, string, error) {
+		want := []string{"ls-tree", "-r", "-z", "--name-only", "deadbeef"}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("unexpected git args: %#v", args)
+		}
+		return "日本語ページ.mw\x00 spaced page.mw\x00image.png\x00", "", nil
+	}
+
+	got, err := listFilesFunc("deadbeef")
+	if err != nil {
+		t.Fatalf("listFilesFunc failed: %v", err)
+	}
+	want := []string{"日本語ページ.mw", " spaced page.mw", "image.png"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected files: got %#v want %#v", got, want)
+	}
+}
+
+func TestNameStatusHelpersParseNULSeparatedUTF8Paths(t *testing.T) {
+	oldGit := gitExec
+	defer func() { gitExec = oldGit }()
+
+	diffOutput := strings.Join([]string{
+		"M", "システムリスク評価チェックリスト%2FDGS00164.mw",
+		"A", "追加ページ.mw",
+		"D", "削除ページ.mw",
+		"R100", "旧ページ.mw", "新ページ.mw",
+		"A", "upload.png",
+		"D", "old.bin",
+		"R100", "old.dat", "new.dat",
+		"",
+	}, "\x00")
+
+	gitExec = func(args ...string) (string, string, error) {
+		want := []string{"diff", "--name-status", "-z", "--find-renames", "basebeef", "deadbeef"}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("unexpected git args: %#v", args)
+		}
+		return diffOutput, "", nil
+	}
+
+	changedMW, err := changedMWFilesFunc("basebeef", "deadbeef")
+	if err != nil {
+		t.Fatalf("changedMWFilesFunc failed: %v", err)
+	}
+	wantChangedMW := []string{
+		"システムリスク評価チェックリスト%2FDGS00164.mw",
+		"追加ページ.mw",
+		"新ページ.mw",
+	}
+	if !reflect.DeepEqual(changedMW, wantChangedMW) {
+		t.Fatalf("unexpected changed mw files: got %#v want %#v", changedMW, wantChangedMW)
+	}
+
+	deletedMW, err := deletedMWFilesFunc("basebeef", "deadbeef")
+	if err != nil {
+		t.Fatalf("deletedMWFilesFunc failed: %v", err)
+	}
+	wantDeletedMW := []string{"削除ページ.mw", "旧ページ.mw"}
+	if !reflect.DeepEqual(deletedMW, wantDeletedMW) {
+		t.Fatalf("unexpected deleted mw files: got %#v want %#v", deletedMW, wantDeletedMW)
+	}
+
+	changedMedia, err := changedMediaFilesFunc("basebeef", "deadbeef")
+	if err != nil {
+		t.Fatalf("changedMediaFilesFunc failed: %v", err)
+	}
+	wantChangedMedia := []string{"upload.png", "new.dat"}
+	if !reflect.DeepEqual(changedMedia, wantChangedMedia) {
+		t.Fatalf("unexpected changed media files: got %#v want %#v", changedMedia, wantChangedMedia)
+	}
+
+	deletedMedia, err := deletedMediaFilesFunc("basebeef", "deadbeef")
+	if err != nil {
+		t.Fatalf("deletedMediaFilesFunc failed: %v", err)
+	}
+	wantDeletedMedia := []string{"old.bin", "old.dat"}
+	if !reflect.DeepEqual(deletedMedia, wantDeletedMedia) {
+		t.Fatalf("unexpected deleted media files: got %#v want %#v", deletedMedia, wantDeletedMedia)
 	}
 }
