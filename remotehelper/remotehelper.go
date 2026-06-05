@@ -235,25 +235,61 @@ func sendCredentialsToGitCredential(ew io.Writer, action, remoteURL, username st
 	return nil
 }
 
-// listFilesFunc lists files in a commit (ls-tree -r --name-only). Override in tests.
+func splitNULPaths(out string) []string {
+	var files []string
+	for _, path := range strings.Split(out, "\x00") {
+		if path == "" {
+			continue
+		}
+		files = append(files, path)
+	}
+	return files
+}
+
+type nameStatusEntry struct {
+	status string
+	old    string
+	new    string
+}
+
+func parseNameStatusZ(out string) []nameStatusEntry {
+	fields := strings.Split(out, "\x00")
+	var entries []nameStatusEntry
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		i++
+		if status == "" {
+			continue
+		}
+		if i >= len(fields) {
+			break
+		}
+		entry := nameStatusEntry{status: status, old: fields[i]}
+		i++
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			if i >= len(fields) {
+				break
+			}
+			entry.new = fields[i]
+			i++
+		} else {
+			entry.new = entry.old
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// listFilesFunc lists files in a commit (ls-tree -r -z --name-only). Override in tests.
 var listFilesFunc = func(commit string) ([]string, error) {
-	out, errOut, err := gitExec("ls-tree", "-r", "--name-only", commit)
+	out, errOut, err := gitExec("ls-tree", "-r", "-z", "--name-only", commit)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(errOut) != "" {
-		debugf(nil, "git ls-tree stderr: %s", errOut)
+		debugf(nil, "git ls-tree -z stderr: %s", errOut)
 	}
-	// Keep stdout intact overall; trim per-line when adding to files to
-	// normalize surrounding whitespace but preserve internal spaces.
-	var files []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		files = append(files, strings.TrimSpace(line))
-	}
-	return files, nil
+	return splitNULPaths(out), nil
 }
 
 // showFileFunc returns the blob content for a given commit:path (git show).
@@ -296,32 +332,24 @@ var deletedMWFilesFunc = func(base, commit string) ([]string, error) {
 	if strings.TrimSpace(base) == "" {
 		return nil, nil
 	}
-	out, errOut, err := gitExec("diff", "--name-status", "--find-renames", base, commit)
+	out, errOut, err := gitExec("diff", "--name-status", "-z", "--find-renames", base, commit)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(errOut) != "" {
-		debugf(nil, "git diff --name-status stderr: %s", errOut)
+		debugf(nil, "git diff --name-status -z stderr: %s", errOut)
 	}
-	// Keep stdout intact; we'll skip empty/whitespace-only lines below.
 	var deleted []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			continue
-		}
-		status := fields[0]
+	for _, entry := range parseNameStatusZ(out) {
+		status := entry.status
 		switch {
 		case status == "D":
-			if strings.HasSuffix(fields[1], ".mw") {
-				deleted = append(deleted, fields[1])
+			if strings.HasSuffix(entry.old, ".mw") {
+				deleted = append(deleted, entry.old)
 			}
 		case strings.HasPrefix(status, "R"):
-			if strings.HasSuffix(fields[1], ".mw") {
-				deleted = append(deleted, fields[1])
+			if strings.HasSuffix(entry.old, ".mw") {
+				deleted = append(deleted, entry.old)
 			}
 		}
 	}
@@ -332,35 +360,27 @@ var changedMWFilesFunc = func(base, commit string) ([]string, error) {
 	if strings.TrimSpace(base) == "" {
 		return listFilesFunc(commit)
 	}
-	out, errOut, err := gitExec("diff", "--name-status", "--find-renames", base, commit)
+	out, errOut, err := gitExec("diff", "--name-status", "-z", "--find-renames", base, commit)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(errOut) != "" {
-		debugf(nil, "git diff --name-status stderr: %s", errOut)
+		debugf(nil, "git diff --name-status -z stderr: %s", errOut)
 	}
-	// Keep stdout intact; we'll skip empty/whitespace-only lines below.
 	seen := make(map[string]bool)
 	var changed []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			continue
-		}
-		status := fields[0]
+	for _, entry := range parseNameStatusZ(out) {
+		status := entry.status
 		switch {
 		case status == "A" || status == "M":
-			if strings.HasSuffix(fields[1], ".mw") && !seen[fields[1]] {
-				seen[fields[1]] = true
-				changed = append(changed, fields[1])
+			if strings.HasSuffix(entry.new, ".mw") && !seen[entry.new] {
+				seen[entry.new] = true
+				changed = append(changed, entry.new)
 			}
 		case strings.HasPrefix(status, "R"):
-			if len(fields) >= 3 && strings.HasSuffix(fields[2], ".mw") && !seen[fields[2]] {
-				seen[fields[2]] = true
-				changed = append(changed, fields[2])
+			if strings.HasSuffix(entry.new, ".mw") && !seen[entry.new] {
+				seen[entry.new] = true
+				changed = append(changed, entry.new)
 			}
 		}
 	}
@@ -371,32 +391,24 @@ var deletedMediaFilesFunc = func(base, commit string) ([]string, error) {
 	if strings.TrimSpace(base) == "" {
 		return nil, nil
 	}
-	out, errOut, err := gitExec("diff", "--name-status", "--find-renames", base, commit)
+	out, errOut, err := gitExec("diff", "--name-status", "-z", "--find-renames", base, commit)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(errOut) != "" {
-		debugf(nil, "git diff --name-status stderr: %s", errOut)
+		debugf(nil, "git diff --name-status -z stderr: %s", errOut)
 	}
-	// Keep stdout intact; we'll skip empty/whitespace-only lines below.
 	var deleted []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			continue
-		}
-		status := fields[0]
+	for _, entry := range parseNameStatusZ(out) {
+		status := entry.status
 		switch {
 		case status == "D":
-			if !strings.HasSuffix(fields[1], ".mw") {
-				deleted = append(deleted, fields[1])
+			if !strings.HasSuffix(entry.old, ".mw") {
+				deleted = append(deleted, entry.old)
 			}
 		case strings.HasPrefix(status, "R"):
-			if !strings.HasSuffix(fields[1], ".mw") {
-				deleted = append(deleted, fields[1])
+			if !strings.HasSuffix(entry.old, ".mw") {
+				deleted = append(deleted, entry.old)
 			}
 		}
 	}
@@ -417,35 +429,27 @@ var changedMediaFilesFunc = func(base, commit string) ([]string, error) {
 		}
 		return changed, nil
 	}
-	out, errOut, err := gitExec("diff", "--name-status", "--find-renames", base, commit)
+	out, errOut, err := gitExec("diff", "--name-status", "-z", "--find-renames", base, commit)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(errOut) != "" {
-		debugf(nil, "git diff --name-status stderr: %s", errOut)
+		debugf(nil, "git diff --name-status -z stderr: %s", errOut)
 	}
-	// Keep stdout intact; we'll skip empty/whitespace-only lines below.
 	seen := make(map[string]bool)
 	var changed []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			continue
-		}
-		status := fields[0]
+	for _, entry := range parseNameStatusZ(out) {
+		status := entry.status
 		switch {
 		case status == "A" || status == "M":
-			if !strings.HasSuffix(fields[1], ".mw") && !seen[fields[1]] {
-				seen[fields[1]] = true
-				changed = append(changed, fields[1])
+			if !strings.HasSuffix(entry.new, ".mw") && !seen[entry.new] {
+				seen[entry.new] = true
+				changed = append(changed, entry.new)
 			}
 		case strings.HasPrefix(status, "R"):
-			if len(fields) >= 3 && !strings.HasSuffix(fields[2], ".mw") && !seen[fields[2]] {
-				seen[fields[2]] = true
-				changed = append(changed, fields[2])
+			if !strings.HasSuffix(entry.new, ".mw") && !seen[entry.new] {
+				seen[entry.new] = true
+				changed = append(changed, entry.new)
 			}
 		}
 	}
