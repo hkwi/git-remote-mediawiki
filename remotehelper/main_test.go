@@ -108,7 +108,7 @@ func TestOptionProgressEnablesProgress(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "ok\nprogress Importing snapshot with 1 pages\n") {
+	if !strings.Contains(got, "ok\nfeature done\nprogress Importing snapshot with 1 pages\n") {
 		t.Fatalf("progress was not enabled: %q", got)
 	}
 }
@@ -149,7 +149,7 @@ func TestOptionVerbosityZeroSuppressesProgress(t *testing.T) {
 	if strings.Contains(got, "progress ") {
 		t.Fatalf("progress should be suppressed at verbosity 0: %q", got)
 	}
-	if !strings.Contains(got, "ok\nok\ncommit refs/mediawiki/origin/master\n") {
+	if !strings.Contains(got, "ok\nok\nfeature done\ncommit refs/mediawiki/origin/master\n") {
 		t.Fatalf("option acknowledgements or import output missing: %q", got)
 	}
 }
