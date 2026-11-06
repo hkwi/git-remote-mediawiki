@@ -552,15 +552,16 @@ func Run(r io.Reader, w io.Writer, ew io.Writer, remotename, url string) error {
 					// unexpected, ignore
 				}
 			}
+			// Require a complete stream so fast-import fails if import stops early.
+			fmt.Fprintln(w, "feature done")
 			// perform import
 			if err := doImport(w, ew, remotename, apiURL, url, refs); err != nil {
 				if errors.Is(err, ErrAuthFailed) {
 					return err
 				}
-				fmt.Fprintf(ew, "import failed: %v\n", err)
-			} else {
-				fmt.Fprintln(w, "done")
+				return fmt.Errorf("import failed: %w", err)
 			}
+			fmt.Fprintln(w, "done")
 		case "push":
 			// Collect subsequent push lines until blank line
 			refs := []string{arg}
@@ -915,38 +916,22 @@ func inspectMissingRevision(httpClient *http.Client, apiURL string, revid int, e
 	return check, nil
 }
 
-func formatMissingRevisionMessage(httpClient *http.Client, apiURL string, missingRevids []int, ew io.Writer) (string, error) {
-	msg := fmt.Sprintf("failed to retrieve revision(s): %v", missingRevids)
-	if len(missingRevids) == 0 {
-		return msg, nil
-	}
-
-	var deleted []string
-	permissionDenied := false
+func classifyMissingRevisions(httpClient *http.Client, apiURL string, missingRevids []int, ew io.Writer) (deleted []missingRevisionCheck, unresolved []int, permissionDenied bool, err error) {
 	for _, revid := range missingRevids {
-		check, err := inspectMissingRevision(httpClient, apiURL, revid, ew)
-		if err != nil {
-			return msg, err
+		check, checkErr := inspectMissingRevision(httpClient, apiURL, revid, ew)
+		if checkErr != nil {
+			return nil, nil, false, checkErr
 		}
 		if check.DeletedTitle != "" {
-			deleted = append(deleted, summarizeMissingRevisionCheck(check))
+			deleted = append(deleted, check)
+		} else {
+			unresolved = append(unresolved, revid)
 		}
 		if check.PermissionDenied {
 			permissionDenied = true
 		}
 	}
-
-	var details []string
-	if len(deleted) > 0 {
-		details = append(details, "deleted revisions: "+strings.Join(deleted, ", "))
-	}
-	if permissionDenied {
-		details = append(details, "insufficient permissions to inspect deleted revisions")
-	}
-	if len(details) == 0 {
-		return msg, nil
-	}
-	return msg + " (" + strings.Join(details, "; ") + ")", nil
+	return deleted, unresolved, permissionDenied, nil
 }
 
 func summarizeMissingRevisionCheck(check missingRevisionCheck) string {
@@ -2025,14 +2010,27 @@ func importRevids(w io.Writer, ew io.Writer, remotename, apiURL string, httpClie
 				actionableMissing = unresolved
 			}
 			if len(actionableMissing) > 0 {
-				msg, err := formatMissingRevisionMessage(httpClient, apiURL, actionableMissing, ew)
+				deleted, unresolved, permissionDenied, err := classifyMissingRevisions(httpClient, apiURL, actionableMissing, ew)
 				if err != nil {
 					return err
 				}
-				if fullImport {
-					fmt.Fprintf(ew, "warning: %s\n", msg)
-				} else {
-					return fmt.Errorf("%s", msg)
+				if len(deleted) > 0 {
+					var details []string
+					for _, check := range deleted {
+						details = append(details, summarizeMissingRevisionCheck(check))
+					}
+					fmt.Fprintf(ew, "warning: skipping deleted revision(s): %s; page deletion state is not synchronized\n", strings.Join(details, ", "))
+				}
+				if len(unresolved) > 0 {
+					msg := fmt.Sprintf("failed to retrieve revision(s): %v", unresolved)
+					if permissionDenied {
+						msg += " (insufficient permissions to inspect deleted revisions)"
+					}
+					if fullImport {
+						fmt.Fprintf(ew, "warning: %s\n", msg)
+					} else {
+						return fmt.Errorf("%s", msg)
+					}
 				}
 			}
 		}
